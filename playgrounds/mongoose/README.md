@@ -9,8 +9,10 @@ instance running in Docker. It includes:
   (`app/mongoose-crud-test.js`) that exercises connect, schema/index creation,
   insert, query, update, aggregation, unique-index enforcement, and delete.
 
-Everything runs on your machine: DocumentDB in a Docker container, the app and
-tests as local Node.js processes. No Kubernetes, no cloud, no image builds.
+The normal app and test paths run entirely on your machine: DocumentDB in a
+Docker container, with the app and tests as local Node.js processes. The
+optional tracing demo builds a custom local image containing the gateway
+tracing changes.
 
 > **What is Mongoose?** Mongoose is a **Node.js library** (an ODM, Object Data
 > Modeling layer), not a CLI tool or a server. Your application imports it to
@@ -21,7 +23,7 @@ tests as local Node.js processes. No Kubernetes, no cloud, no image builds.
 ## Prerequisites
 
 - **Docker** (Docker Desktop or a Docker daemon) — runs DocumentDB locally
-- **Node.js 18+** and **npm** — runs the app and test suite
+- **Node.js 18.19.x or 20.6+** and **npm** — runs the app and test suite
 
 That's it. The scripts pull the official `documentdb-local` image and start it
 for you.
@@ -79,6 +81,53 @@ Stop the database when you're done:
 ./scripts/stop-documentdb.sh
 ```
 
+## Trace the application and gateway
+
+The shared telemetry stack runs a custom DocumentDB image, an OpenTelemetry
+Collector, and Jaeger. The Mongoose app emits HTTP and client spans, then puts
+the active W3C trace context in each supported database command's `comment`
+field. The gateway uses that context as the parent of `gateway.request`.
+
+```text
+HTTP request
+  -> Express server span
+       -> Mongoose client span
+            -> gateway.request
+                 -> gateway.process_request
+                      -> postgres.execute
+```
+
+First build a local image from a DocumentDB source checkout that contains the
+gateway tracing changes:
+
+```bash
+cd ../../shared/telemetry
+DOCUMENTDB_SOURCE_DIR=/path/to/documentdb \
+  ./scripts/build-documentdb-image.sh
+```
+
+Start the telemetry stack and Mongoose API:
+
+```bash
+cd ../../playgrounds/mongoose
+./scripts/run-telemetry-demo.sh
+```
+
+In another terminal, generate API traffic and verify that Jaeger received one
+trace containing both the application and gateway services:
+
+```bash
+./scripts/verify-telemetry.sh
+```
+
+The verification helper also requires Python 3.
+
+The verification script prints a direct trace URL. The Jaeger UI is also
+available at <http://localhost:16686>.
+
+The normal `run-app.sh` and `run-test.sh` paths remain unchanged. Application
+tracing is enabled only when `OTEL_TRACES_ENABLED=true`.
+
 ## Trying the API
 
 With `./scripts/run-app.sh` running, the API is on `http://localhost:3000`:
@@ -106,6 +155,8 @@ curl -s http://localhost:3000/stats/genres | jq .
 | ----------------------------- | ------------------------------------------------------------------------------ |
 | `scripts/run-test.sh`         | Start DocumentDB (if needed) and run the Mongoose CRUD/compatibility suite.     |
 | `scripts/run-app.sh`          | Start DocumentDB (if needed) and run the Express + Mongoose API locally.        |
+| `scripts/run-telemetry-demo.sh` | Start the shared Collector, Jaeger, and DocumentDB stack, then run the traced API. |
+| `scripts/verify-telemetry.sh` | Generate API traffic and verify a connected application and gateway trace.      |
 | `scripts/start-documentdb.sh` | Start the local DocumentDB container and wait until it is ready.                |
 | `scripts/stop-documentdb.sh`  | Stop and remove the local DocumentDB container.                                |
 | `scripts/lib.sh`              | Shared helpers: container lifecycle, readiness wait, connection-string builder. |
@@ -184,6 +235,9 @@ Read by [`app/db.js`](app/db.js), [`app/server.js`](app/server.js), and
 | `TLS_INSECURE`                | `true`                                        | app + test | When `true`, accepts the gateway's self-signed cert. Set `false` for CA-verified TLS.|
 | `SERVER_SELECTION_TIMEOUT_MS` | `10000`                                       | app        | How long Mongoose waits to select a server before erroring.                         |
 | `PORT`                        | `3000`                                        | app        | Port the Express API listens on.                                                    |
+| `OTEL_TRACES_ENABLED`         | `false`                                       | app        | Enable HTTP, Mongoose client, and trace-context propagation instrumentation.        |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OpenTelemetry default                         | app        | Collector endpoint used by the traced app.                                          |
+| `OTEL_SERVICE_NAME`           | SDK default                                   | app        | Application service name shown in Jaeger.                                           |
 
 ## Running the Test Suite Manually
 
@@ -254,6 +308,7 @@ mongoose/
 │   ├── package.json
 │   ├── db.js                    # Mongoose connection (DocumentDB options)
 │   ├── server.js                # Express REST API (/books, /health, /stats)
+│   ├── telemetry.js             # Optional OpenTelemetry setup + context propagation
 │   ├── models/book.js           # Example Mongoose schema/model
 │   └── mongoose-crud-test.js    # Standalone CRUD/compatibility test suite
 └── scripts/
@@ -261,5 +316,7 @@ mongoose/
     ├── start-documentdb.sh      # Start the local DocumentDB container
     ├── stop-documentdb.sh       # Stop/remove the local DocumentDB container
     ├── run-app.sh               # Start DocumentDB + run the API locally
+    ├── run-telemetry-demo.sh    # Start shared telemetry + run the traced API
+    ├── verify-telemetry.sh      # Verify the joined app and gateway trace
     └── run-test.sh              # Start DocumentDB + run the test suite
 ```

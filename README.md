@@ -62,12 +62,32 @@ cd playgrounds/pymongo
 ./scripts/run-app.sh    # or run the demo REST API
 ```
 
+## Shared telemetry demo
+
+[`shared/telemetry/`](shared/telemetry/) provides a reusable local stack with a
+tracing-enabled DocumentDB image, an OpenTelemetry Collector, and Jaeger. Start
+it once, then use any playground against the shared `documentdb-local`
+container.
+
+The Mongoose playground also includes optional application instrumentation and
+client-to-gateway trace-context propagation:
+
+```bash
+cd playgrounds/mongoose
+./scripts/run-telemetry-demo.sh
+```
+
+See the [shared telemetry guide](shared/telemetry/README.md) for image build,
+configuration, and verification instructions.
+
 ## Repository Layout
 
 ```
 documentdb-playground/
 ├── README.md
 ├── LICENSE
+├── shared/
+│   └── telemetry/    # Collector + Jaeger + tracing-enabled DocumentDB stack
 └── playgrounds/
     ├── mongoose/     # Node.js + Mongoose ODM
     ├── mongodb-node/ # Node.js + MongoDB native driver

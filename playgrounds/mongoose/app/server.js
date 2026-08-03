@@ -1,15 +1,28 @@
 'use strict';
 
+const {
+  installMongooseTracePropagation,
+  shutdownTelemetry,
+  traceDocumentDbOperation,
+  tracingEnabled,
+} = require('./telemetry');
 const express = require('express');
 const mongoose = require('mongoose');
 
 const { connect } = require('./db');
 const Book = require('./models/book');
 
+installMongooseTracePropagation(mongoose);
+
 const app = express();
 app.use(express.json());
 
 const PORT = Number(process.env.PORT || 3000);
+const DB_NAME = process.env.MONGO_DB || 'mongoose_demo';
+
+function traceBookOperation(operationName, operation) {
+  return traceDocumentDbOperation(operationName, DB_NAME, operation);
+}
 
 // Liveness/readiness probe. Returns 200 only when the Mongoose connection is up.
 app.get('/health', (req, res) => {
@@ -23,7 +36,7 @@ app.get('/health', (req, res) => {
 // Create a book.
 app.post('/books', async (req, res) => {
   try {
-    const book = await Book.create(req.body);
+    const book = await traceBookOperation('insert', () => Book.create(req.body));
     res.status(201).json(book);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -34,7 +47,9 @@ app.post('/books', async (req, res) => {
 app.get('/books', async (req, res) => {
   try {
     const filter = req.query.author ? { author: req.query.author } : {};
-    const books = await Book.find(filter).sort({ createdAt: -1 }).limit(100).lean();
+    const books = await traceBookOperation('find', () =>
+      Book.find(filter).sort({ createdAt: -1 }).limit(100).lean()
+    );
     res.json({ count: books.length, books });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -44,7 +59,9 @@ app.get('/books', async (req, res) => {
 // Fetch a single book by id.
 app.get('/books/:id', async (req, res) => {
   try {
-    const book = await Book.findById(req.params.id).lean();
+    const book = await traceBookOperation('findOne', () =>
+      Book.findById(req.params.id).lean()
+    );
     if (!book) return res.status(404).json({ error: 'not found' });
     res.json(book);
   } catch (err) {
@@ -55,10 +72,12 @@ app.get('/books/:id', async (req, res) => {
 // Update a book.
 app.patch('/books/:id', async (req, res) => {
   try {
-    const book = await Book.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true,
-    }).lean();
+    const book = await traceBookOperation('findOneAndUpdate', () =>
+      Book.findByIdAndUpdate(req.params.id, req.body, {
+        new: true,
+        runValidators: true,
+      }).lean()
+    );
     if (!book) return res.status(404).json({ error: 'not found' });
     res.json(book);
   } catch (err) {
@@ -69,7 +88,9 @@ app.patch('/books/:id', async (req, res) => {
 // Delete a book.
 app.delete('/books/:id', async (req, res) => {
   try {
-    const result = await Book.findByIdAndDelete(req.params.id).lean();
+    const result = await traceBookOperation('findOneAndDelete', () =>
+      Book.findByIdAndDelete(req.params.id).lean()
+    );
     if (!result) return res.status(404).json({ error: 'not found' });
     res.status(204).end();
   } catch (err) {
@@ -80,11 +101,13 @@ app.delete('/books/:id', async (req, res) => {
 // Simple aggregation: count books per genre.
 app.get('/stats/genres', async (req, res) => {
   try {
-    const stats = await Book.aggregate([
-      { $unwind: '$genres' },
-      { $group: { _id: '$genres', count: { $sum: 1 } } },
-      { $sort: { count: -1 } },
-    ]);
+    const stats = await traceBookOperation('aggregate', () =>
+      Book.aggregate([
+        { $unwind: '$genres' },
+        { $group: { _id: '$genres', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+      ])
+    );
     res.json(stats);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -94,20 +117,34 @@ app.get('/stats/genres', async (req, res) => {
 async function main() {
   await connect();
   console.log('Connected to DocumentDB via Mongoose');
+  if (tracingEnabled) {
+    console.log('OpenTelemetry tracing enabled');
+  }
   const server = app.listen(PORT, () =>
     console.log(`Mongoose demo API listening on :${PORT}`)
   );
 
+  let shuttingDown = false;
   const shutdown = (signal) => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
     console.log(`Received ${signal}, shutting down...`);
     server.close(() => {
-      mongoose.connection.close(false).finally(() => process.exit(0));
+      Promise.all([mongoose.connection.close(false), shutdownTelemetry()])
+        .then(() => process.exit(0))
+        .catch((err) => {
+          console.error('Shutdown error:', err.message);
+          process.exit(1);
+        });
     });
   };
   ['SIGTERM', 'SIGINT'].forEach((sig) => process.on(sig, () => shutdown(sig)));
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error('Fatal startup error:', err.message);
+  await shutdownTelemetry();
   process.exit(1);
 });

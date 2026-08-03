@@ -5,13 +5,18 @@
   "license": "MIT",
   "type": "commonjs",
   "engines": {
-    "node": ">=18"
+    "node": "^18.19.0 || >=20.6.0"
   },
   "scripts": {
     "start": "node server.js",
     "test:crud": "node mongoose-crud-test.js"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.221.0",
+    "@opentelemetry/instrumentation-express": "^0.69.0",
+    "@opentelemetry/instrumentation-http": "^0.221.0",
+    "@opentelemetry/sdk-node": "^0.221.0",
     "express": "^4.21.2",
     "mongoose": "^8.9.5"
   }

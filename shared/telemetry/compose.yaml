@@ -1,0 +1,53 @@
+name: documentdb-telemetry
+
+services:
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.20.0
+    ports:
+      - "127.0.0.1:${JAEGER_UI_PORT:-16686}:16686"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.157.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    depends_on:
+      - jaeger
+    ports:
+      - "127.0.0.1:${OTEL_COLLECTOR_GRPC_PORT:-4317}:4317"
+      - "127.0.0.1:${OTEL_COLLECTOR_HTTP_PORT:-4318}:4318"
+      - "127.0.0.1:${OTEL_COLLECTOR_HEALTH_PORT:-13133}:13133"
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - documentdb-logs:/var/log/documentdb:ro
+
+  documentdb:
+    image: ${DOCUMENTDB_IMAGE:-documentdb-local:gateway-tracing}
+    container_name: documentdb-local
+    depends_on:
+      - otel-collector
+    environment:
+      USERNAME: ${DOCUMENTDB_USERNAME:-docdbadmin}
+      PASSWORD: ${DOCUMENTDB_PASSWORD:-Documentdb!Local1}
+      INIT_DATA: "false"
+      OTEL_SERVICE_VERSION: ${DOCUMENTDB_SERVICE_VERSION:-local}
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
+      DOCUMENTDB_SQL_COMMENTER_ENABLED: ${DOCUMENTDB_SQL_COMMENTER_ENABLED:-false}
+    ports:
+      - "127.0.0.1:${DOCUMENTDB_PORT:-10260}:10260"
+    volumes:
+      - ./gateway-setup.json:/home/documentdb/gateway/pg_documentdb_gw/SetupConfiguration.json:ro
+      - documentdb-data:/data
+      - documentdb-logs:/var/log/documentdb
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "echo | openssl s_client -connect localhost:10260 -brief 2>&1 | grep -q 'CONNECTION ESTABLISHED'",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+volumes:
+  documentdb-data:
+  documentdb-logs:

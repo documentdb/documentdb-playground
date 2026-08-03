@@ -9,6 +9,7 @@ set -euo pipefail
 DOCUMENTDB_IMAGE="${DOCUMENTDB_IMAGE:-ghcr.io/documentdb/documentdb/documentdb-local:latest}"
 DOCUMENTDB_CONTAINER="${DOCUMENTDB_CONTAINER:-documentdb-local}"
 DOCUMENTDB_PORT="${DOCUMENTDB_PORT:-10260}"
+DOCUMENTDB_CONTAINER_PORT=10260
 DOCUMENTDB_USERNAME="${DOCUMENTDB_USERNAME:-docdbadmin}"
 DOCUMENTDB_PASSWORD="${DOCUMENTDB_PASSWORD:-Documentdb!Local1}"
 
@@ -17,6 +18,10 @@ DOCUMENTDB_PASSWORD="${DOCUMENTDB_PASSWORD:-Documentdb!Local1}"
 # a direct connection and accept the container's self-signed certificate.
 build_uri() {
     echo "mongodb://${DOCUMENTDB_USERNAME}:${DOCUMENTDB_PASSWORD}@localhost:${DOCUMENTDB_PORT}/?tls=true&tlsAllowInvalidCertificates=true&directConnection=true"
+}
+
+build_container_uri() {
+    echo "mongodb://${DOCUMENTDB_USERNAME}:${DOCUMENTDB_PASSWORD}@localhost:${DOCUMENTDB_CONTAINER_PORT}/?tls=true&tlsAllowInvalidCertificates=true&directConnection=true"
 }
 
 require_docker() {
@@ -69,7 +74,7 @@ ensure_documentdb() {
 # Poll the gateway until it responds to a MongoDB ping (or time out).
 wait_for_documentdb() {
     local uri
-    uri="$(build_uri)"
+    uri="$(build_container_uri)"
     echo "Waiting for DocumentDB to accept connections ..."
 
     local i
