@@ -11,8 +11,8 @@ instance running in Docker. It includes:
 
 The normal app and test paths run entirely on your machine: DocumentDB in a
 Docker container, with the app and tests as local Node.js processes. The
-optional tracing demo builds a custom local image containing the gateway
-tracing changes.
+optional tracing demo uses a published image containing the gateway tracing
+changes.
 
 > **What is Mongoose?** Mongoose is a **Node.js library** (an ODM, Object Data
 > Modeling layer), not a CLI tool or a server. Your application imports it to
@@ -83,10 +83,11 @@ Stop the database when you're done:
 
 ## Trace the application and gateway
 
-The shared telemetry stack runs a custom DocumentDB image, an OpenTelemetry
-Collector, and Jaeger. The Mongoose app emits HTTP and client spans, then puts
-the active W3C trace context in each supported database command's `comment`
-field. The gateway uses that context as the parent of `gateway.request`.
+The shared telemetry stack runs a tracing-enabled DocumentDB image, an
+OpenTelemetry Collector, and Jaeger. The Mongoose app emits HTTP and client
+spans, then puts the active W3C trace context in each supported database
+command's `comment` field. The gateway uses that context as the parent of
+`gateway.request`.
 
 ```text
 HTTP request
@@ -97,16 +98,9 @@ HTTP request
                       -> postgres.execute
 ```
 
-First build a local image from a DocumentDB source checkout that contains the
-gateway tracing changes:
-
-```bash
-cd ../../shared/telemetry
-DOCUMENTDB_SOURCE_DIR=/path/to/documentdb \
-  ./scripts/build-documentdb-image.sh
-```
-
-Start the telemetry stack and Mongoose API:
+Start the telemetry stack and Mongoose API. The stack pulls
+`ghcr.io/documentdb/documentdb/documentdb-local:trace-4fbbfcb8`
+automatically:
 
 ```bash
 cd ../../playgrounds/mongoose

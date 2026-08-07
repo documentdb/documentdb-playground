@@ -77,8 +77,8 @@ cd playgrounds/mongoose
 ./scripts/run-telemetry-demo.sh
 ```
 
-See the [shared telemetry guide](shared/telemetry/README.md) for image build,
-configuration, and verification instructions.
+See the [shared telemetry guide](shared/telemetry/README.md) for image,
+configuration, and verification details.
 
 ## Repository Layout
 

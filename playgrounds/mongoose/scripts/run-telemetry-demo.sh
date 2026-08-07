@@ -19,7 +19,7 @@ fi
 export OTEL_TRACES_ENABLED=true
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:${OTEL_COLLECTOR_GRPC_PORT:-4317}"
 export OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-documentdb-mongoose}"
-export DOCUMENTDB_IMAGE="${DOCUMENTDB_IMAGE:-documentdb-local:gateway-tracing}"
+export DOCUMENTDB_IMAGE="${DOCUMENTDB_IMAGE:-ghcr.io/documentdb/documentdb/documentdb-local:trace-4fbbfcb8}"
 
 echo ""
 echo "Application tracing is enabled."

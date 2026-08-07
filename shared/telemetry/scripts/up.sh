@@ -13,17 +13,6 @@ docker info >/dev/null 2>&1 || {
     exit 1
 }
 
-if ! docker image inspect "$DOCUMENTDB_IMAGE" >/dev/null 2>&1; then
-    cat >&2 <<EOF
-DocumentDB image not found locally: $DOCUMENTDB_IMAGE
-
-Build it from a source checkout containing the tracing changes:
-  DOCUMENTDB_SOURCE_DIR=/path/to/documentdb \
-    $SCRIPT_DIR/build-documentdb-image.sh
-EOF
-    exit 1
-fi
-
 if docker inspect documentdb-local >/dev/null 2>&1; then
     existing_project="$(
         docker inspect \

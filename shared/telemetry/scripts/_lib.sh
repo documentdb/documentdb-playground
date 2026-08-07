@@ -15,7 +15,7 @@ load_telemetry_env() {
         set +a
     fi
 
-    export DOCUMENTDB_IMAGE="${DOCUMENTDB_IMAGE:-documentdb-local:gateway-tracing}"
+    export DOCUMENTDB_IMAGE="${DOCUMENTDB_IMAGE:-ghcr.io/documentdb/documentdb/documentdb-local:trace-4fbbfcb8}"
     export DOCUMENTDB_USERNAME="${DOCUMENTDB_USERNAME:-docdbadmin}"
     export DOCUMENTDB_PASSWORD="${DOCUMENTDB_PASSWORD:-Documentdb!Local1}"
     export DOCUMENTDB_PORT="${DOCUMENTDB_PORT:-10260}"

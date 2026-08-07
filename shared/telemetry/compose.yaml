@@ -20,7 +20,7 @@ services:
       - documentdb-logs:/var/log/documentdb:ro
 
   documentdb:
-    image: ${DOCUMENTDB_IMAGE:-documentdb-local:gateway-tracing}
+    image: ${DOCUMENTDB_IMAGE:-ghcr.io/documentdb/documentdb/documentdb-local:trace-4fbbfcb8}
     container_name: documentdb-local
     depends_on:
       - otel-collector
