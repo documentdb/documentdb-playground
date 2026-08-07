@@ -19,9 +19,39 @@ app.use(express.json());
 
 const PORT = Number(process.env.PORT || 3000);
 const DB_NAME = process.env.MONGO_DB || 'mongoose_demo';
+const BOOK_UPDATE_FIELDS = [
+  'title',
+  'author',
+  'genres',
+  'pages',
+  'published',
+  'inStock',
+  'rating',
+];
 
 function traceBookOperation(operationName, operation) {
   return traceDocumentDbOperation(operationName, DB_NAME, operation);
+}
+
+function parseAuthor(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') return null;
+
+  const author = value.trim();
+  if (author.length === 0 || author.length > 100) return null;
+  return author;
+}
+
+function pickBookUpdates(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+
+  const changes = {};
+  for (const field of BOOK_UPDATE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(body, field)) {
+      changes[field] = body[field];
+    }
+  }
+  return changes;
 }
 
 // Liveness/readiness probe. Returns 200 only when the Mongoose connection is up.
@@ -46,7 +76,13 @@ app.post('/books', async (req, res) => {
 // List books, optionally filtered by author.
 app.get('/books', async (req, res) => {
   try {
-    const filter = req.query.author ? { author: req.query.author } : {};
+    const author = parseAuthor(req.query.author);
+    if (author === null) {
+      return res.status(400).json({
+        error: 'author must be a non-empty string up to 100 characters',
+      });
+    }
+    const filter = author === undefined ? {} : { author };
     const books = await traceBookOperation('find', () =>
       Book.find(filter).sort({ createdAt: -1 }).limit(100).lean()
     );
@@ -72,8 +108,12 @@ app.get('/books/:id', async (req, res) => {
 // Update a book.
 app.patch('/books/:id', async (req, res) => {
   try {
+    const changes = pickBookUpdates(req.body);
+    if (!changes || Object.keys(changes).length === 0) {
+      return res.status(400).json({ error: 'no supported book fields provided' });
+    }
     const book = await traceBookOperation('findOneAndUpdate', () =>
-      Book.findByIdAndUpdate(req.params.id, req.body, {
+      Book.findByIdAndUpdate(req.params.id, { $set: changes }, {
         new: true,
         runValidators: true,
       }).lean()
