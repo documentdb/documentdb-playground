@@ -69,11 +69,11 @@ require_docker() {
 }
 
 container_running() {
-    [ "$(docker inspect -f '{{.State.Running}}' "$DOCUMENTDB_CONTAINER" 2>/dev/null)" = "true" ]
+    [ "$(docker container inspect -f '{{.State.Running}}' "$DOCUMENTDB_CONTAINER" 2>/dev/null)" = "true" ]
 }
 
 container_exists() {
-    docker inspect "$DOCUMENTDB_CONTAINER" >/dev/null 2>&1
+    docker container inspect "$DOCUMENTDB_CONTAINER" >/dev/null 2>&1
 }
 
 ensure_documentdb() {

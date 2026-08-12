@@ -13,9 +13,9 @@ docker info >/dev/null 2>&1 || {
     exit 1
 }
 
-if docker inspect documentdb-local >/dev/null 2>&1; then
+if docker container inspect documentdb-local >/dev/null 2>&1; then
     existing_project="$(
-        docker inspect \
+        docker container inspect \
             --format '{{ index .Config.Labels "com.docker.compose.project" }}' \
             documentdb-local 2>/dev/null || true
     )"
@@ -38,7 +38,7 @@ wait_for_url \
     120
 
 elapsed=0
-while [ "$(docker inspect --format '{{.State.Health.Status}}' documentdb-local)" != "healthy" ]; do
+while [ "$(docker container inspect --format '{{.State.Health.Status}}' documentdb-local)" != "healthy" ]; do
     if [ "$elapsed" -ge 240 ]; then
         echo "DocumentDB did not become healthy within 240s" >&2
         compose logs --no-color documentdb
