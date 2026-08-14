@@ -20,6 +20,7 @@ playground's README states what it needs.
 | [beanie](playgrounds/beanie/)           | Python — Beanie ODM      | FastAPI REST API + a CRUD/compatibility test suite using the Beanie ODM.         |
 | [pymongo](playgrounds/pymongo/)         | Python — PyMongo driver  | Flask REST API + a CRUD/compatibility test suite using the raw PyMongo driver.   |
 | [benchmarks](playgrounds/benchmarks/)   | Shared + adapters        | Repeatable performance experiments, including local latency analysis.           |
+| [spring-data-mongodb](playgrounds/spring-data-mongodb/) | Java — Spring Data MongoDB | Spring Boot REST API + a CRUD/compatibility test suite using Spring Data MongoDB. |
 
 More MongoDB driver playgrounds are planned. Contributions are welcome.
 
@@ -63,6 +64,14 @@ cd playgrounds/pymongo
 ./scripts/run-app.sh    # or run the demo REST API
 ```
 
+To try the Spring Data MongoDB playground:
+
+```bash
+cd playgrounds/spring-data-mongodb
+./scripts/run-test.sh   # start DocumentDB locally and run the compatibility suite
+./scripts/run-app.sh    # or run the demo REST API
+```
+
 ## Shared telemetry demo
 
 [`shared/telemetry/`](shared/telemetry/) provides a reusable local stack with a
@@ -94,11 +103,12 @@ documentdb-playground/
 ├── shared/
 │   └── telemetry/    # Collector + Jaeger + tracing-enabled DocumentDB stack
 └── playgrounds/
-    ├── benchmarks/   # Performance experiments + driver adapters
-    ├── mongoose/     # Node.js + Mongoose ODM
-    ├── mongodb-node/ # Node.js + MongoDB native driver
-    ├── beanie/       # Python + Beanie ODM
-    └── pymongo/      # Python + PyMongo driver
+    ├── benchmarks/          # Performance experiments + driver adapters
+    ├── mongoose/            # Node.js + Mongoose ODM
+    ├── mongodb-node/        # Node.js + MongoDB native driver
+    ├── beanie/              # Python + Beanie ODM
+    ├── pymongo/             # Python + PyMongo driver
+    └── spring-data-mongodb/ # Java + Spring Data MongoDB
 ```
 
 ## License
