@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import re
 import sys
@@ -14,11 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from compatibility.contracts import read_registry
-from compatibility.publish import (
+from compatibility.publish import render
+from compatibility.readme import markdown_cell
+from compatibility.results import (
     RunKey,
     append_result,
     read_result,
-    render,
     result_key,
     validate_incoming_result,
 )
@@ -60,12 +60,6 @@ def select_runs(
             }
         )
     return runs
-
-
-def markdown_cell(value: str) -> str:
-    """Keep diagnostics as table text rather than executable HTML or Markdown."""
-    escaped = html.escape(value).replace("\r", " ").replace("\n", " ")
-    return re.sub(r"([\\`*_{}\[\]()|])", r"\\\1", escaped)
 
 
 def collect_report(
