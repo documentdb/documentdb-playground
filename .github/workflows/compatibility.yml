@@ -1,4 +1,5 @@
 name: Ecosystem compatibility
+run-name: ${{ inputs.demonstration && 'Ecosystem compatibility (demonstration)' || 'Ecosystem compatibility' }}
 
 on:
   workflow_dispatch:

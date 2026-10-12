@@ -31,7 +31,9 @@ def validate_schema(value: Any, name: str) -> None:
         raise ValueError(f"Invalid {name} field {location}: {error.validator}")
 
 
-def read_registry(path: Path = ROOT / "compatibility" / "registry.yaml") -> dict[str, Any]:
+def read_registry(
+    path: Path = ROOT / "compatibility" / "registry.yaml", *, root: Path = ROOT
+) -> dict[str, Any]:
     """Load the reviewed registry and validate adapter locations and defaults."""
     registry = yaml.safe_load(path.read_text())
     validate_schema(registry, "registry")
@@ -39,10 +41,10 @@ def read_registry(path: Path = ROOT / "compatibility" / "registry.yaml") -> dict
         if not re.fullmatch(integration["version_pattern"], integration["default_version"]):
             raise ValueError(f"Default version is outside the policy for {name}")
         for key in ("test_file", "demonstration_file"):
-            test_file = (ROOT / integration[key]).resolve()
-            allowed = (ROOT / "compatibility" / "integrations" / name).resolve()
+            test_file = (root / integration[key]).resolve()
+            allowed = (root / "compatibility" / "integrations" / name).resolve()
             if (
-                not allowed.is_relative_to(ROOT)
+                not allowed.is_relative_to(root.resolve())
                 or test_file.parent != allowed
                 or not test_file.is_file()
                 or test_file.suffix != (".py" if integration["runtime"] == "python" else ".cjs")

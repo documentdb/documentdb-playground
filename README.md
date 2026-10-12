@@ -11,6 +11,17 @@ that your driver of choice behaves the way you expect. Others may target
 different environments (for example Kubernetes or a cloud deployment); each
 playground's README states what it needs.
 
+## Compatibility status
+
+[![Compatibility results](/../compatibility-data/site/status.svg)](/../compatibility-data/site/README.md)
+
+[Run details and accessible results](/../compatibility-data/site/README.md)
+show tested versions, actual execution timestamps, and the latest attempt
+separately from the last conclusive compatibility evidence. Results cover only
+the registered profiles and their declared scenarios, not every client API.
+Fork results are labeled as previews. The dashboard refreshes from stored
+evidence without changing execution timestamps.
+
 ## Playgrounds
 
 | Playground                              | Language / Stack         | What it shows                                                                    |
