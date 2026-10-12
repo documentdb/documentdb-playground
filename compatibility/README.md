@@ -90,27 +90,6 @@ This runs the normal scenarios plus one labeled intentional assertion failure
 and must exit nonzero. Demonstration evidence cannot replace a compatibility
 verdict. Use only synthetic data; do not supply production credentials.
 
-## Playground test commands
-
-The [PyMongo playground](../playgrounds/pymongo/README.md) can invoke the same
-runner without maintaining a separate compatibility verdict:
-
-```bash
-./playgrounds/pymongo/scripts/run-test.sh --compatibility \
-  --output compatibility/.test-results/pymongo-playground-001/result.json
-```
-
-This mode uses the controller environment described above. Arguments after
-`--compatibility` are forwarded to the runner, with the integration selected by
-the playground. Relative output paths are resolved from the repository root.
-It creates its own disposable resources and does not use the playground's
-connection settings or existing database.
-
-Without `--compatibility`, playground scripts retain their interactive test
-behavior, including any additional scenarios or explicitly tolerated limitations.
-Those results are not imported as compatibility verdicts. The registry's required
-scenarios and verified result records define the coverage of this pipeline.
-
 ## Interpret results
 
 Working requires verified identities and every required scenario to pass.
