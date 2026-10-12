@@ -1,0 +1,49 @@
+name: Compatibility infrastructure
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "compatibility/**"
+      - ".github/workflows/compatibility*"
+      - ".github/aw/actions-lock.json"
+      - "playgrounds/**/scripts/run-test.sh"
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+    paths:
+      - "compatibility/**"
+      - ".github/workflows/compatibility*"
+      - ".github/aw/actions-lock.json"
+      - "playgrounds/**/scripts/run-test.sh"
+
+concurrency:
+  group: compatibility-infrastructure-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compatibility-unit-tests:
+    name: Compatibility infrastructure
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Install compatibility development dependencies
+        run: python -m pip install -r compatibility/requirements-dev.txt
+      - name: Check scoped Python formatting and types
+        run: |
+          python -m black --check --config compatibility/pyproject.toml compatibility
+          python -m isort --check-only --settings-path compatibility/pyproject.toml compatibility
+          python -m flake8 --max-line-length=100 --extend-ignore=E203 compatibility
+          python -m mypy --config-file compatibility/pyproject.toml compatibility
+      - name: Run compatibility unit tests
+        run: python -m pytest -c compatibility/pyproject.toml compatibility/unit
+      - name: Check the playground compatibility entrypoint
+        run: shellcheck -x -P SCRIPTDIR playgrounds/pymongo/scripts/run-test.sh
