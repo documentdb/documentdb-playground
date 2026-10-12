@@ -305,6 +305,7 @@ def test_infrastructure_is_checked_without_starting_an_integration():
     assert "compatibility/requirements-dev.txt" in commands
     assert "compatibility/unit" in commands
     assert "test_freshness.cjs" in commands
+    assert "test_nodejs.cjs" in commands
     assert "compatibility.runner" not in commands
 
 

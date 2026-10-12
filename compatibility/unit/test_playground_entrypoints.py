@@ -14,7 +14,10 @@ import pytest
 from compatibility.contracts import ROOT
 
 
-@pytest.mark.parametrize("integration,playground", [("pymongo", "pymongo")])
+@pytest.mark.parametrize(
+    "integration,playground",
+    [("pymongo", "pymongo"), ("nodejs", "mongodb-node"), ("mongoose", "mongoose")],
+)
 @pytest.mark.parametrize("exit_code", [0, 1])
 def test_compatibility_entrypoint(tmp_path, registry, integration, playground, exit_code):
     module = tmp_path / "stub" / "compatibility"

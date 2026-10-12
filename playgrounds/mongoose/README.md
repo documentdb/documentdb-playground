@@ -81,6 +81,24 @@ Stop the database when you're done:
 ./scripts/stop-documentdb.sh
 ```
 
+## Isolated compatibility profile
+
+For version-pinned compatibility evidence, use the
+[shared runner](../../compatibility/README.md#run-locally) with its Python 3.12
+controller dependencies installed:
+
+```bash
+./scripts/run-test.sh --compatibility \
+  --output compatibility/.test-results/mongoose-playground-001/result.json
+```
+
+This selects the `mongoose` registry profile and runs the client in its pinned
+container, without requiring a host Node.js installation. Relative output paths
+are resolved from the repository root. It does not reuse the interactive
+playground's database, connection settings, or test results. Unlike the
+interactive suite's documented exceptions, every required profile scenario must
+pass for a Working verdict.
+
 ## Trace the application and gateway
 
 The shared telemetry stack runs a tracing-enabled DocumentDB image, an
