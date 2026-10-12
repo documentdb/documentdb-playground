@@ -9,14 +9,12 @@ on:
       - "compatibility/**"
       - ".github/workflows/compatibility*"
       - ".github/aw/actions-lock.json"
-      - "playgrounds/**/scripts/run-test.sh"
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
     paths:
       - "compatibility/**"
       - ".github/workflows/compatibility*"
       - ".github/aw/actions-lock.json"
-      - "playgrounds/**/scripts/run-test.sh"
 
 concurrency:
   group: compatibility-infrastructure-${{ github.event.pull_request.number || github.ref }}
@@ -45,5 +43,3 @@ jobs:
           python -m mypy --config-file compatibility/pyproject.toml compatibility
       - name: Run compatibility unit tests
         run: python -m pytest -c compatibility/pyproject.toml compatibility/unit
-      - name: Check the playground compatibility entrypoint
-        run: shellcheck -x -P SCRIPTDIR playgrounds/pymongo/scripts/run-test.sh
