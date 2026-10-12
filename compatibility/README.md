@@ -30,10 +30,27 @@ dependency versions and hashes, its runtime version, and its image identity.
 An execution-input digest includes the suite, controller, schemas, and runtime
 recipe, including uncommitted local changes.
 
+For Node.js, every npm archive must match the SHA-512 integrity in the reviewed
+`package-lock.json`. Installation is offline with lifecycle scripts and optional
+packages disabled. The client verifies installed dependency versions and records
+their SHA-256 hashes. Shared JavaScript execution and reporting live in
+`compatibility/client.cjs` and `compatibility/report.cjs`, separate from adapters.
+
+The Node.js and Mongoose profiles accept only their reviewed locked versions.
+To select another, update the manifest in `compatibility/integrations/nodejs` or
+`compatibility/integrations/mongoose`, regenerate that adapter's lockfile using Node 24 and
+`npm install --package-lock-only --ignore-scripts --engine-strict --omit=optional`,
+and update the registry default and version policy. Review dependency changes and
+rerun both the normal and demonstration profiles.
+Mongoose's transitive MongoDB driver is independently locked and recorded as a
+dependency, never substituted for the Mongoose package version.
+
 ## Coverage
 
-The PyMongo profile exercises synchronous driver APIs. Its required scenarios are
-declared in the registry's `expected_tests` list and cover the following behavior:
+The PyMongo and native Node.js profiles exercise synchronous Python and
+asynchronous JavaScript driver APIs, respectively. Each profile's required
+scenarios are declared in the registry's `expected_tests` list and cover the
+following behavior:
 
 | Area | Behavior |
 | --- | --- |
@@ -47,7 +64,33 @@ declared in the registry's `expected_tests` list and cover the following behavio
 Each scenario has a fresh disposable database. Required cases cannot be silently
 skipped or exempted. A result applies only to its exact version pair, runtime,
 execution inputs, and declared scenarios. It does not establish compatibility
-for async APIs, transactions, vector search, or other unlisted features.
+for Python async APIs, transactions, vector search, or other unlisted features.
+
+The Node.js profile uses the corresponding camel-case APIs (`insertOne`, `findOne`,
+`findOneAndUpdate`, and others), promises, and `for await` cursor iteration. It
+checks native driver return shapes and BSON representations rather than replaying
+raw commands through another client. Python async APIs, optional native Node.js
+modules, transactions, vector search, and unlisted APIs remain out of scope.
+
+### Mongoose model coverage
+
+The Mongoose profile's `expected_tests` list names its required model and document
+scenarios. They exercise ODM behavior rather than bypassing it through raw driver
+collections:
+
+| Area | Behavior checked |
+| --- | --- |
+| Connection | Authenticated administrative ping through the model connection |
+| Creation | `Model.create`, `insertMany`, identifiers, casting, defaults, timestamps, hydration, and exact readback |
+| Reads and cursors | `findById` with string-ID casting, missing documents, filters, projection, sorting, counts, and observed `getMore` |
+| Writes | Document `save` and dirty tracking, `updateOne`, `findOneAndUpdate`, deletes, result objects, and persisted effects |
+| Aggregation and indexes | Exact aggregation output, schema-driven indexes, index listing, and duplicate-key rejection |
+| Validation and BSON | Required/minimum validators on inserts and updates, ObjectId, BigInt, Decimal128, dates, buffers, arrays, booleans, and nested documents |
+
+Each scenario uses a fresh connection and database with automatic index and
+collection creation and command buffering disabled. Every declared scenario must
+pass; there are no known-failure exemptions. Transactions, population,
+plugins, middleware, vector search, and unlisted model APIs are outside this profile.
 
 ## Run locally
 
@@ -62,6 +105,10 @@ python -m compatibility.runner --integration pymongo \
   --output compatibility/.test-results/pymongo-001/result.json
 python -m compatibility.runner --integration pymongo --version 4.9.0 \
   --output compatibility/.test-results/pymongo-4.9.0/result.json
+python -m compatibility.runner --integration nodejs \
+  --output compatibility/.test-results/nodejs-001/result.json
+python -m compatibility.runner --integration mongoose \
+  --output compatibility/.test-results/mongoose-001/result.json
 ```
 
 Each invocation requires a fresh output path and creates fresh credentials,
@@ -74,6 +121,12 @@ verified wheels. `--wheelhouse /path/to/wheels` reuses downloaded wheels, but Py
 metadata verification still requires network access. Do not disable TLS
 verification for package downloads.
 
+For Node.js profiles, `--package-cache /path/to/cache` reuses archives named
+`<sha256-of-the-lockfile-integrity-string>.tgz`. Every cached archive is verified
+against the reviewed lockfile; a complete cache needs no registry access.
+`--wheelhouse` is Python-only and `--package-cache` is Node-only. Node.js is needed
+only inside the pinned client container, not on the controller host.
+
 The output includes `result.json`, a sanitized `result.log`, and `result.xml`
 when tests execute. Setup failures still produce a validated JSON envelope and
 diagnostics. Cleanup targets only the invocation's labeled Docker resources.
@@ -84,6 +137,10 @@ To verify the nonpassing path:
 ```bash
 python -m compatibility.runner --integration pymongo --demonstration \
   --output compatibility/.test-results/pymongo-demo-001/result.json
+python -m compatibility.runner --integration nodejs --demonstration \
+  --output compatibility/.test-results/nodejs-demo-001/result.json
+python -m compatibility.runner --integration mongoose --demonstration \
+  --output compatibility/.test-results/mongoose-demo-001/result.json
 ```
 
 This runs the normal scenarios plus one labeled intentional assertion failure
@@ -92,12 +149,16 @@ verdict. Use only synthetic data; do not supply production credentials.
 
 ## Playground test commands
 
-The [PyMongo playground](../playgrounds/pymongo/README.md) can invoke the same
-runner without maintaining a separate compatibility verdict:
+The playground test scripts can invoke the same runner without maintaining
+separate compatibility verdicts:
 
 ```bash
 ./playgrounds/pymongo/scripts/run-test.sh --compatibility \
   --output compatibility/.test-results/pymongo-playground-001/result.json
+./playgrounds/mongodb-node/scripts/run-test.sh --compatibility \
+  --output compatibility/.test-results/nodejs-playground-001/result.json
+./playgrounds/mongoose/scripts/run-test.sh --compatibility \
+  --output compatibility/.test-results/mongoose-playground-001/result.json
 ```
 
 This mode uses the controller environment described above. Arguments after
@@ -271,11 +332,11 @@ python -m flake8 --max-line-length=100 --extend-ignore=E203 compatibility
 python -m mypy --config-file compatibility/pyproject.toml compatibility
 python -m pytest -c compatibility/pyproject.toml compatibility/unit
 shellcheck compatibility/persist.sh
-node --test compatibility/unit/test_freshness.cjs
+node --test compatibility/unit/test_freshness.cjs compatibility/unit/test_nodejs.cjs
 ```
 
-Run the JavaScript freshness checks with Node 24 in a tooling container. They do
-not require a database or installed integration packages.
+Run the JavaScript reporting and freshness checks with Node 24 in a tooling
+container. They do not require a database or installed integration packages.
 
 Also exercise normal and deliberate-failure runs against the selected released
 database image. Assertions and fixtures should derive selected configuration
