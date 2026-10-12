@@ -14,12 +14,6 @@ set -euo pipefail
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [[ "${1:-}" == "--compatibility" ]]; then
-    shift
-    cd "$SCRIPT_DIR/../../.."
-    exec python3 -m compatibility.runner "$@" --integration pymongo
-fi
-
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
