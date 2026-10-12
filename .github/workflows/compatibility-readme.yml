@@ -1,0 +1,99 @@
+name: Compatibility README dashboard
+
+on:
+  workflow_run:
+    workflows: ["Ecosystem compatibility"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Completed compatibility workflow run ID, or blank to refresh stored evidence
+        type: string
+        required: false
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/compatibility-readme.yml"
+      - "compatibility/**"
+      - "README.md"
+  schedule:
+    - cron: "17 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Distinct runs must not evict each other's pending publications.
+  group: compatibility-readme-${{ github.repository }}-${{ github.event.workflow_run.id || inputs.run_id || github.run_id }}-${{ github.event.workflow_run.run_attempt || github.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish README status
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name != 'workflow_run' ||
+       (github.event.workflow_run.event == 'workflow_dispatch' &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
+        github.event.workflow_run.head_branch == github.event.repository.default_branch))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out trusted publisher code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Install trusted publication dependencies
+        run: python -m pip install -r compatibility/requirements.txt
+      - name: Validate source workflow identity
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          python -m compatibility.readme prepare \
+            --repository "$GITHUB_REPOSITORY" --branch "$DEFAULT_BRANCH" \
+            --event-name "$EVENT_NAME" --event-file "$GITHUB_EVENT_PATH" \
+            --run-id "$SOURCE_RUN_ID" --output "$RUNNER_TEMP/compatibility-source.json"
+      - name: Read reviewed source execution inputs
+        if: steps.source.outputs.action == 'publish'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ steps.source.outputs.source_sha }}
+          path: .compatibility-source
+          persist-credentials: false
+      - name: Download this source attempt's combined evidence
+        if: steps.source.outputs.action == 'publish'
+        id: evidence
+        continue-on-error: true
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: ${{ steps.source.outputs.artifact }}
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: .compatibility-report
+      - name: Record unavailable artifacts
+        if: steps.source.outputs.action == 'publish' && steps.evidence.outcome != 'success'
+        run: |
+          echo "::warning::Source report unavailable; the dashboard will expose missing evidence, not a compatibility pass."
+      - name: Persist evidence and publish the status snapshot
+        if: steps.source.outputs.action != 'ignore'
+        run: |
+          bash compatibility/publish-readme.sh \
+            "$RUNNER_TEMP/compatibility-source.json" \
+            "$GITHUB_WORKSPACE/.compatibility-source" \
+            "$GITHUB_WORKSPACE/.compatibility-report"
+          {
+            echo "## README compatibility status"
+            echo
+            echo "Execution timestamps and outcomes are published on the compatibility-data branch."
+            echo "https://github.com/$GITHUB_REPOSITORY/blob/compatibility-data/site/README.md"
+          } >> "$GITHUB_STEP_SUMMARY"

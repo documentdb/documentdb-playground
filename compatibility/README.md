@@ -102,6 +102,43 @@ Never share credentials or customer data.
 Runs emit runtime-neutral schema version 2. Schema-version-1 Python records remain
 readable without rewriting their immutable provenance.
 
+## README dashboard
+
+The repository README embeds a generated SVG from the `compatibility-data`
+branch. Its accompanying Markdown table provides accessible results and links
+to the source workflow runs and their detailed report artifacts. Both views use
+the shared result, coverage, and freshness rules in `results.py`.
+
+The dashboard shows client and DocumentDB versions, the last conclusive evidence,
+the latest attempt's outcome and execution timestamp, and verified scenario
+counts. An incomplete attempt cannot acquire an earlier attempt's success.
+Workflow failures without usable profile artifacts remain visible separately
+from older conclusive evidence. Synthetic demonstrations are excluded.
+
+`Compatibility README dashboard` consumes completed `Ecosystem compatibility`
+runs from the same repository's default branch. Test execution remains read-only;
+only the trusted publisher can write the data branch. The publisher checks the
+source run, workflow path, repository, branch, artifact attempt, and reviewed
+execution inputs. It reads source files to verify their digests but never executes
+source-run code or downloaded artifact content.
+
+Result JSON files remain immutable. Workflow-attempt identity and execution time
+cannot be rewritten, while a later publication can recover previously unavailable
+artifacts for that same attempt. Non-force updates preserve concurrent data
+writers. The workflow refreshes the snapshot when default-branch inputs change
+and hourly for freshness; it commits only when the published content changes.
+It does not activate AI, create issues, or deploy a public website.
+
+For manual recovery, dispatch `Compatibility README dashboard` on the default
+branch with a completed compatibility `run_id`. Leave that input empty to render
+stored evidence without launching tests. The source report artifact must still
+be available. Before a completed run is published, the initialized dashboard
+shows Not tested. Fork snapshots are explicitly labeled as previews.
+
+GitHub may cache embedded images. The accessible results and `site/status.json`
+on the data branch expose the same snapshot. Execution timestamps always refer
+to actual runs, never to rendering or refresh time.
+
 ## Extend and maintain
 
 Add a reviewed adapter directory, pinned image and package requirements, normal

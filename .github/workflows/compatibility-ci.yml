@@ -43,3 +43,5 @@ jobs:
           python -m mypy --config-file compatibility/pyproject.toml compatibility
       - name: Run compatibility unit tests
         run: python -m pytest -c compatibility/pyproject.toml compatibility/unit
+      - name: Check the README dashboard publisher
+        run: shellcheck compatibility/publish-readme.sh
