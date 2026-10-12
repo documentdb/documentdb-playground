@@ -322,7 +322,7 @@ For manual recovery, dispatch `Compatibility README dashboard` on the default
 branch with a completed compatibility `run_id`. Leave that input empty to render
 stored evidence without launching tests. The source report artifact must still
 be available. Before a completed run is published, the initialized dashboard
-shows Not tested. Fork snapshots are explicitly labeled as previews.
+shows Not tested.
 
 GitHub may cache embedded images. The accessible results and `site/status.json`
 on the data branch expose the same snapshot. Execution timestamps always refer

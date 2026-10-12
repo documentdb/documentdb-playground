@@ -108,9 +108,13 @@ def test_real_profile_evidence_drives_svg_json_and_accessible_details(
     assert row["conclusive_at"] == published_record["finished_at"]
     assert row["passed"] == row["expected"] == len(published_record["expected_tests"])
     text = "".join(ElementTree.fromstring((data / "site/status.svg").read_text()).itertext())
-    assert "FORK PREVIEW" in text and readme.utc(published_record["finished_at"]) in text
+    assert readme.utc(published_record["finished_at"]) in text
+    assert "FORK PREVIEW" not in text
+    assert "Scoped scenario evidence" not in text
     details = (data / "site/README.md").read_text()
     assert published_record["run_url"] in details and "Working" in details
+    assert "Fork preview" not in details
+    assert "Results apply only" not in details
 
 
 def test_missing_latest_artifact_does_not_inherit_an_earlier_pass(
