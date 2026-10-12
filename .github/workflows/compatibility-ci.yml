@@ -47,6 +47,8 @@ jobs:
         run: python -m pytest -c compatibility/pyproject.toml compatibility/unit
       - name: Check the trusted Git history publisher
         run: shellcheck compatibility/persist.sh
+      - name: Check the README dashboard publisher
+        run: shellcheck compatibility/publish-readme.sh
       - name: Check the compiled compatibility watcher
         run: |
           compiler="$RUNNER_TEMP/gh-aw"

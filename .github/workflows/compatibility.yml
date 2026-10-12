@@ -1,5 +1,5 @@
 name: Ecosystem compatibility
-run-name: ${{ inputs.detection_id != '' && format('Ecosystem compatibility [watch:{0}:{1}]', inputs.detection_id, inputs.dispatch_id) || 'Ecosystem compatibility' }}
+run-name: ${{ inputs.demonstration && 'Ecosystem compatibility (demonstration)' || (inputs.detection_id != '' && format('Ecosystem compatibility [watch:{0}:{1}]', inputs.detection_id, inputs.dispatch_id) || 'Ecosystem compatibility') }}
 
 on:
   workflow_dispatch:

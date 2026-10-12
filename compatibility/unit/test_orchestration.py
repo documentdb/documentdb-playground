@@ -449,7 +449,7 @@ def test_conflicting_ids_do_not_overwrite_other_integration_evidence(
         registry["integrations"][first["integration"]]
     )
     # Exercise cross-integration collisions without requiring a second real adapter.
-    monkeypatch.setattr("compatibility.publish.suite_digest", lambda *_: first["suite_digest"])
+    monkeypatch.setattr("compatibility.results.suite_digest", lambda *_: first["suite_digest"])
     runs = [
         {**selection, "demonstration": False},
         {**selection, "integration": "additional", "demonstration": False},
