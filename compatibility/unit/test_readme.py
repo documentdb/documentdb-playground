@@ -92,6 +92,7 @@ def test_empty_dashboard_is_not_tested_and_has_no_execution_timestamp(tmp_path, 
     )
     assert "No completed compatibility workflow" in readme.markdown(view)
     assert "Not tested" in "".join(ElementTree.fromstring(readme.svg(view)).itertext())
+    assert "pymongo: Not tested" in readme.badge_svg(view, "pymongo")
 
 
 def test_real_profile_evidence_drives_svg_json_and_accessible_details(
@@ -111,8 +112,13 @@ def test_real_profile_evidence_drives_svg_json_and_accessible_details(
     assert readme.utc(published_record["finished_at"]) in text
     assert "FORK PREVIEW" not in text
     assert "Scoped scenario evidence" not in text
+    badge = ElementTree.fromstring((data / "site/badges/pymongo.svg").read_text())
+    assert badge.find("{http://www.w3.org/2000/svg}title").text == "pymongo: Working"
+    assert readme.utc(published_record["finished_at"]) in "".join(badge.itertext())
     details = (data / "site/README.md").read_text()
     assert published_record["run_url"] in details and "Working" in details
+    assert "## pymongo\n" in details
+    assert published_record["profile"] in details
     assert "Fork preview" not in details
     assert "Results apply only" not in details
 
@@ -140,6 +146,7 @@ def test_missing_latest_artifact_does_not_inherit_an_earlier_pass(
     assert row["conclusive_at"] == published_record["finished_at"]
     assert row["run_url"] == later["run_url"] and view["latest_workflow"]["errors"]
     assert view["latest_workflow"]["conclusion"] == "failure"
+    assert "pymongo: Not tested" in readme.badge_svg(view, "pymongo")
 
 
 def test_failure_before_a_report_exists_is_visible(tmp_path, registry, attempt):
@@ -156,6 +163,48 @@ def test_failure_before_a_report_exists_is_visible(tmp_path, registry, attempt):
     assert view["latest_workflow"]["errors"]
     assert all(row["state"] == "Not tested" for row in view["integrations"])
     assert "missing or rejected evidence" in readme.svg(view)
+
+
+def test_unknown_failed_selection_does_not_leave_an_earlier_badge_green(
+    tmp_path, registry, published_record, attempt
+):
+    append_result(tmp_path / "results", published_record)
+    attempt.update(
+        run_id=43,
+        run_url=readme.run_url(REPOSITORY, 43, 1),
+        started_at=published_record["finished_at"],
+        profiles=[],
+        conclusion="failure",
+    )
+    readme.ingest(
+        {"action": "publish", "attempt": attempt},
+        ROOT,
+        tmp_path / "missing",
+        tmp_path,
+        REPOSITORY,
+    )
+    view = readme.snapshot(tmp_path, registry, REPOSITORY, datetime.now(timezone.utc))
+    assert selected_row(view, published_record)["state"] == "Working"
+    assert "pymongo: Not tested" in readme.badge_svg(view, "pymongo")
+
+
+def test_badge_does_not_hide_another_versions_failure(
+    tmp_path, registry, published_record, other_version
+):
+    append_result(tmp_path / "results", published_record)
+    failing = deepcopy(published_record)
+    failing["id"] = "b" * 32
+    failing["upstream"]["version"] = other_version
+    failing["upstream"]["actual_version"] = other_version
+    failing["tests"][0]["outcome"] = "failed"
+    append_result(tmp_path / "results", failing)
+    view = readme.snapshot(tmp_path, registry, REPOSITORY, datetime.now(timezone.utc))
+    assert selected_row(view, published_record)["state"] == "Working"
+    badge = ElementTree.fromstring(readme.badge_svg(view, "pymongo"))
+    assert badge.find("{http://www.w3.org/2000/svg}title").text == "pymongo: Failing"
+    assert readme.COLORS["Failing"] in [
+        node.get("fill") for node in badge.iter("{http://www.w3.org/2000/svg}rect")
+    ]
 
 
 def test_republication_can_recover_missing_artifacts_without_rewriting_run_identity(
@@ -194,6 +243,7 @@ def test_refresh_ages_evidence_without_inventing_a_new_execution(
     )
     assert selected_row(first, published_record)["state"] == "Working"
     assert selected_row(later, published_record)["state"] == "Stale"
+    assert "pymongo: Stale" in readme.badge_svg(later, "pymongo")
     assert first["latest_workflow"] == later["latest_workflow"]
     assert selected_row(first, published_record)["last_attempt"] == (
         selected_row(later, published_record)["last_attempt"]
@@ -228,6 +278,9 @@ def test_svg_and_markdown_keep_metadata_as_text(tmp_path, registry):
     assert not list(svg.iter("{http://www.w3.org/2000/svg}script"))
     assert "<script>" in "".join(svg.itertext())
     assert "[unsafe](javascript" not in readme.markdown(view)
+    badge = ElementTree.fromstring(readme.badge_svg(view, view["integrations"][0]["integration"]))
+    assert not list(badge.iter("{http://www.w3.org/2000/svg}script"))
+    assert "<script>" in "".join(badge.itertext())
 
 
 @pytest.mark.parametrize(
@@ -305,12 +358,16 @@ def test_input_digest_validation_reads_the_source_revision(tmp_path, registry, p
         validate_incoming_result(published_record, registry, published_record["run_url"])
 
 
-def test_output_symlinks_and_foreign_evidence_are_rejected(tmp_path, registry, published_record):
+@pytest.mark.parametrize("asset", ["status.svg", "badges/pymongo.svg"])
+def test_output_symlinks_and_foreign_evidence_are_rejected(
+    tmp_path, registry, published_record, asset
+):
     output = tmp_path / "output"
     output.mkdir()
     outside = tmp_path / "outside.svg"
     outside.write_text("unchanged")
-    (output / "status.svg").symlink_to(outside)
+    (output / asset).parent.mkdir(parents=True, exist_ok=True)
+    (output / asset).symlink_to(outside)
     with pytest.raises(ValueError, match="symbolic links"):
         readme.render(tmp_path / "data", output, REPOSITORY)
     assert outside.read_text() == "unchanged"
