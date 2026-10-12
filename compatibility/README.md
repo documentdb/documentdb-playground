@@ -236,10 +236,17 @@ credentials, repository permissions, or a release-watcher ledger.
 
 ## README dashboard
 
-The repository README embeds a generated SVG from the `compatibility-data`
-branch. Its accompanying Markdown table provides accessible results and links
-to the source workflow runs and their detailed report artifacts. Both views use
-the shared result, coverage, and freshness rules in `results.py`.
+The repository README embeds compact integration badges from the `compatibility-data`
+branch. Each badge links to that integration's accessible results table, including
+the source workflow runs and their detailed report artifacts. The publisher generates
+`site/badges/<integration>.svg`, per-integration sections in `site/README.md`, and the
+full status card in `site/status.svg` from the shared status snapshot.
+
+Badges summarize the integration's published version and profile rows, using
+Failing before Not tested, Stale, and Working. A missing latest result prevents a
+green badge even when an earlier pass remains available in the details. A workflow
+that fails before its profile selection is known also prevents a green badge.
+Freshness and intentional-failure exclusion follow the same rules as the details.
 
 The dashboard shows client and DocumentDB versions, the last conclusive evidence,
 the latest attempt's outcome and execution timestamp, and verified scenario
@@ -272,6 +279,10 @@ on the data branch expose the same snapshot. Execution timestamps always refer
 to actual runs, never to rendering or refresh time.
 
 ## Extend and maintain
+
+When adding an integration, include its badge in the root README. Use
+`/../compatibility-data/site/badges/<integration>.svg` for the image and
+`/../compatibility-data/site/README.md#<integration>` for the details link.
 
 Add a reviewed adapter directory, pinned image and package requirements, normal
 and deliberate-failure suites, and a registry entry naming every required
