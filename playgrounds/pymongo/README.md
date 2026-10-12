@@ -83,23 +83,6 @@ Stop the database when you are done:
 
 The suite should end with `Passed: 16  Failed: 0`.
 
-### Isolated compatibility profile
-
-For version-pinned compatibility evidence, use the
-[shared runner](../../compatibility/README.md#run-locally) with its Python 3.12
-controller dependencies installed:
-
-```bash
-./scripts/run-test.sh --compatibility \
-  --output compatibility/.test-results/pymongo-playground-001/result.json
-```
-
-This invokes the canonical PyMongo profile in fresh containers and writes its
-verified JSON, JUnit, and sanitized diagnostics. Relative output paths are
-resolved from the repository root. It does not reuse the interactive playground's
-database, connection settings, or test results. The profile's declared coverage
-does not include every scenario in the interactive test script.
-
 ## Trying the API
 
 With `./scripts/run-app.sh` running, the API is on `http://localhost:3000`:
