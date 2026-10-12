@@ -373,10 +373,7 @@ def markdown_cell(value: str) -> str:
 
 def markdown(view: dict[str, Any]) -> str:
     lines = ["# Compatibility status", ""]
-    if view["preview"]:
-        lines += ["**Fork preview. This is not an official compatibility support matrix.**", ""]
     lines += [
-        "Results apply only to the listed versions, runtime profiles, and required scenarios.",
         "The latest attempt is separate from the last conclusive compatibility evidence.",
         "",
     ]
@@ -427,7 +424,7 @@ def markdown(view: dict[str, Any]) -> str:
 
 def svg(view: dict[str, Any]) -> str:
     rows = view["integrations"]
-    height = 232 + 96 * max(1, len(rows))
+    height = 213 + 96 * max(1, len(rows))
     root = ElementTree.Element(
         "svg",
         {
@@ -462,8 +459,7 @@ def svg(view: dict[str, Any]) -> str:
         ).text = value
 
     text(24, 38, "DocumentDB compatibility", 25)
-    label = "FORK PREVIEW" if view["preview"] else "REPOSITORY RESULTS"
-    text(24, 65, f"{label}: {view['repository']}", 14, "#475467")
+    text(24, 65, view["repository"], 14, "#475467")
     latest = view["latest_workflow"]
     if latest:
         text(
@@ -519,13 +515,6 @@ def svg(view: dict[str, Any]) -> str:
         text(635, top + 25, row["latest_attempt_state"], 17, COLORS[row["latest_attempt_state"]])
         text(795, top + 25, utc(row["last_attempt"]), 13)
         text(1080, top + 25, f"{row['passed']} / {row['expected']}", 17)
-    text(
-        24,
-        height - 29,
-        "Scoped scenario evidence, not complete API certification. " "Demonstrations are excluded.",
-        12,
-        "#475467",
-    )
     text(
         24,
         height - 10,
