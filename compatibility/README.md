@@ -4,6 +4,10 @@ This registry-driven runner tests ecosystem integration profiles against reviewe
 DocumentDB releases. Execution, artifact verification, and result contracts are
 shared; each integration adapter implements its own scenario suite.
 
+The manual workflow selects enabled profiles and combines validated results as
+Markdown, HTML, and JSON. A trusted publisher can append results to Git history
+with the persistence helper.
+
 ## Profiles and reviewed artifacts
 
 [`registry.yaml`](registry.yaml) defines profiles, enablement, default package
@@ -123,6 +127,131 @@ Never share credentials or customer data.
 Runs emit runtime-neutral schema version 2. Schema-version-1 Python records remain
 readable without rewriting their immutable provenance.
 
+## Results and dashboard preview
+
+Append locally produced normal and demonstration records to an immutable store:
+
+```bash
+python -m compatibility.publish \
+  --result compatibility/.test-results/pymongo-001/result.json \
+  --store compatibility/.test-results/history \
+  --site compatibility/.test-results/site --preview
+python -m compatibility.publish \
+  --result compatibility/.test-results/pymongo-demo-001/result.json \
+  --store compatibility/.test-results/history \
+  --site compatibility/.test-results/site --preview
+```
+
+Open `compatibility/.test-results/site/index.html`. The same validated history
+produces HTML, `current.json`, and `history.json`. Conflicting run IDs are rejected;
+identical replays are idempotent. Demonstrations remain separate from normal
+compatibility evidence. Local runs have no fabricated pipeline URL.
+
+| State | Meaning |
+| --- | --- |
+| Working | All required scenarios passed with verified artifacts |
+| Failing | A conclusive assertion or non-timeout operation/protocol failure |
+| Not tested | Missing or skipped coverage, timeouts, setup errors, or other incomplete execution |
+| Stale | The last conclusive result is older than the profile's freshness policy or no longer matches its execution inputs/artifacts |
+
+If a newer attempt cannot execute, retain the previous conclusive result while
+exposing the new attempt's failure separately. Keep version pairs and profiles
+distinct. Browser-side freshness also ages previously rendered results.
+
+The `--preview` option labels review prototypes and hides public issue links.
+Without it, the renderer provides prefilled links to this repository's
+[compatibility issue form](../.github/ISSUE_TEMPLATE/compatibility-report.yml).
+Use `--issue-repository` to select a different reporting destination with the
+same form field IDs. A report should include the actual version pair,
+runtime/profile, relevant run, and a minimal synthetic reproduction, never
+credentials or customer data.
+
+This renderer does not push Git history, deploy a site, create issues, or change
+repository settings. Public hosting and durable publication require a separately
+approved destination, publisher, operational owner, and reporting route.
+
+## GitHub Actions workflow
+
+Manual dispatch requires the workflow on the repository's default branch.
+Select **Ecosystem compatibility** in the Actions tab, then choose the branch
+and reviewed database release to exercise. The integration
+defaults to `all`: a planning job expands every enabled registry entry using its
+own reviewed default version. Select one integration for a focused run or version
+override. A version override with `all`, a disabled integration, a version outside
+its registry policy, or an unknown database release is rejected before test jobs
+start. Keep the failure demonstration disabled for real results.
+
+Each matrix job runs its complete scenario suite against its own disposable
+database. Matrix fail-fast is disabled. JSON and available JUnit/logs are retained
+in `compatibility-results-<integration>-<attempt>` artifacts even when the job
+fails. Results record the `manual` trigger and exact workflow-attempt URL.
+
+After the matrix finishes, reporting validates each selected result's identity,
+coverage, artifacts, suite digest, and workflow-attempt URL. The summary includes
+every selected integration. Missing or rejected results are **Not tested**, with
+a diagnostic, not fabricated envelopes or an earlier attempt's pass. Compatibility
+failures remain **Failing**, and failed or incomplete reports exit nonzero without
+suppressing matrix failures.
+
+The `compatibility-report-<attempt>` artifact contains `summary.md`, machine-readable
+`summary.json`, accepted envelopes in `results/`, and a combined preview in `site/`.
+Only selected profiles and versions appear, including explicit overrides and
+labeled demonstrations. All artifacts have 30-day retention.
+
+Use **Re-run all jobs** for a complete matrix rerun. Reporting deliberately
+collects only the current attempt's artifacts, so rerunning only failed jobs can
+leave other integrations without current-attempt evidence. Re-running an older
+workflow retains its original commit; dispatch a fresh run to test new code.
+
+All jobs have read-only repository permissions. The workflow does not publish
+Git history, deploy a site, create issues, or change repository settings.
+
+To inspect selection or combine locally produced records:
+
+```bash
+python -m compatibility.workflow matrix --integration all
+python -m compatibility.workflow report --integration all \
+  --input compatibility/.test-results/incoming \
+  --output compatibility/.test-results/combined-001
+```
+
+Place each record under `incoming/<integration>/result.json`. Use the same
+integration, version, database, and demonstration selection as the producing
+runs, and a fresh output directory. `--expected-run-url` binds a combined report
+to one workflow attempt; omit it for local results. `--summary` appends the
+Markdown report to a GitHub step-summary file.
+
+## Durable Git history
+
+The generic history helper is available for an explicitly configured trusted
+publisher, not for integration clients:
+
+```bash
+bash compatibility/persist.sh /path/to/result.json "$EXPECTED_RUN_URL"
+```
+
+Run it from the trusted source checkout with write access to the intended
+`origin`. Set `EXPECTED_RUN_URL` to the originating test attempt, not a later
+publication retry. The helper verifies that URL, declared coverage, database
+artifact, and execution-input digest, then appends `results/<id>.json` to
+`compatibility-data`.
+
+The helper uses non-force pushes with bounded conflict retries and initializes
+an orphan branch containing only result data. Identical replays are idempotent;
+conflicting run IDs fail rather than overwrite history. Concurrent writers'
+records survive retry, and temporary worktrees are removed. Retain the data
+branch independently of artifact expiration.
+
+Keep write credentials separate from integration execution. A publisher must
+retain failed attempts and serialize deployment only after results are durably
+stored. Render complete history with `compatibility.publish`, using `--preview`
+for review prototypes. Deployment retries must not delete or rewrite history.
+Cancellation before persistence is not a compatibility verdict.
+
+Invoke this helper explicitly from the trusted publisher; the compatibility
+workflow does not call it. It does not configure hosting, GitHub Pages,
+credentials, repository permissions, or a release-watcher ledger.
+
 ## Extend and maintain
 
 Add a reviewed adapter directory, pinned image and package requirements, normal
@@ -130,6 +259,7 @@ and deliberate-failure suites, and a registry entry naming every required
 scenario. Keep package preparation, runtime validation, and provenance support
 with any new runtime. Enable an integration only when its real adapter exists.
 A registry entry alone does not implement runtime support.
+Expose it in the workflow's integration selector as well as the registry.
 
 Run infrastructure checks in a prepared Python 3.12 tooling container:
 
@@ -140,7 +270,12 @@ python -m isort --check-only --settings-path compatibility/pyproject.toml compat
 python -m flake8 --max-line-length=100 --extend-ignore=E203 compatibility
 python -m mypy --config-file compatibility/pyproject.toml compatibility
 python -m pytest -c compatibility/pyproject.toml compatibility/unit
+shellcheck compatibility/persist.sh
+node --test compatibility/unit/test_freshness.cjs
 ```
+
+Run the JavaScript freshness checks with Node 24 in a tooling container. They do
+not require a database or installed integration packages.
 
 Also exercise normal and deliberate-failure runs against the selected released
 database image. Assertions and fixtures should derive selected configuration
