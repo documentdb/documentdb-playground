@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -391,27 +392,30 @@ def markdown(view: dict[str, Any]) -> str:
             lines.append("")
     else:
         lines += ["**No completed compatibility workflow has been published.**", ""]
-    lines += [
-        "| Integration | Client / DocumentDB | Evidence | Verified cases | Last conclusive | "
-        "Latest attempt | Attempted at | Details |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
-    ]
-    for row in view["integrations"]:
-        fields = [
-            row["integration"],
-            f"{row['upstream_version']} / {row['documentdb_version']}",
-            row["state"],
-            f"{row['passed']}/{row['expected']}",
-            utc(row["conclusive_at"]),
-            row["latest_attempt_state"],
-            utc(row["last_attempt"]),
+    for integration, rows in groupby(view["integrations"], key=lambda row: row["integration"]):
+        lines += [
+            f"## {markdown_cell(integration)}",
+            "",
+            "| Client / DocumentDB | Profile | Evidence | Verified cases | Last conclusive | "
+            "Latest attempt | Attempted at | Details |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
-        details = f"[Run]({row['run_url']})" if row["run_url"] else "No run"
-        lines.append(
-            "| " + " | ".join(markdown_cell(field) for field in fields) + f" | {details} |"
-        )
+        for row in rows:
+            fields = [
+                f"{row['upstream_version']} / {row['documentdb_version']}",
+                row["profile"],
+                row["state"],
+                f"{row['passed']}/{row['expected']}",
+                utc(row["conclusive_at"]),
+                row["latest_attempt_state"],
+                utc(row["last_attempt"]),
+            ]
+            details = f"[Run]({row['run_url']})" if row["run_url"] else "No run"
+            lines.append(
+                "| " + " | ".join(markdown_cell(field) for field in fields) + f" | {details} |"
+            )
+        lines.append("")
     lines += [
-        "",
         "Timestamps describe executions, not dashboard refreshes. Intentional-failure "
         "demonstrations are excluded. Freshness follows the registry and execution-input digests.",
         "",
@@ -526,9 +530,85 @@ def svg(view: dict[str, Any]) -> str:
     return ElementTree.tostring(root, encoding="unicode") + "\n"
 
 
+def badge_svg(view: dict[str, Any], integration: str) -> str:
+    rows = [row for row in view["integrations"] if row["integration"] == integration]
+    states = {row["state"] for row in rows}
+    latest = view["latest_workflow"]
+    unknown_selection = latest and latest["errors"] and not latest["profiles"]
+    if (
+        not rows
+        or unknown_selection
+        or any(row["latest_attempt_state"] == "Not tested" for row in rows)
+    ):
+        states.add("Not tested")
+    state = next(
+        value for value in ("Failing", "Not tested", "Stale", "Working") if value in states
+    )
+    left_width = 20 + 7 * len(integration)
+    right_width = 20 + 7 * len(state)
+    width = left_width + right_width
+    root = ElementTree.Element(
+        "svg",
+        {
+            "xmlns": "http://www.w3.org/2000/svg",
+            "width": str(width),
+            "height": "24",
+            "viewBox": f"0 0 {width} 24",
+            "role": "img",
+            "aria-labelledby": "title description",
+        },
+    )
+    ElementTree.SubElement(root, "title", {"id": "title"}).text = f"{integration}: {state}"
+    details = [
+        f"Client {row['upstream_version']}, DocumentDB {row['documentdb_version']}, "
+        f"profile {row['profile']}: {row['state']}. "
+        f"Latest attempt: {row['latest_attempt_state']} at {utc(row['last_attempt'])}."
+        for row in rows
+    ]
+    if unknown_selection:
+        details.append("The latest workflow has no validated profile selection or evidence.")
+    ElementTree.SubElement(root, "desc", {"id": "description"}).text = " ".join(
+        [*details, "Open the integration details for execution timestamps and run links."]
+    )
+    clip = ElementTree.SubElement(
+        ElementTree.SubElement(root, "defs"), "clipPath", {"id": "rounded"}
+    )
+    ElementTree.SubElement(clip, "rect", {"width": str(width), "height": "24", "rx": "4"})
+    background = ElementTree.SubElement(root, "g", {"clip-path": "url(#rounded)"})
+    ElementTree.SubElement(
+        background, "rect", {"width": str(width), "height": "24", "fill": "#475467"}
+    )
+    ElementTree.SubElement(
+        background,
+        "rect",
+        {"x": str(left_width), "width": str(right_width), "height": "24", "fill": COLORS[state]},
+    )
+    for x, value in (
+        (left_width / 2, integration),
+        (left_width + right_width / 2, state),
+    ):
+        ElementTree.SubElement(
+            root,
+            "text",
+            {
+                "x": str(x),
+                "y": "16",
+                "fill": "#ffffff",
+                "font-family": "Verdana, DejaVu Sans, sans-serif",
+                "font-size": "12",
+                "text-anchor": "middle",
+                "textLength": str(7 * len(value)),
+                "lengthAdjust": "spacingAndGlyphs",
+            },
+        ).text = value
+    return ElementTree.tostring(root, encoding="unicode") + "\n"
+
+
 def render(data: Path, site: Path, repository: str, *, now: datetime | None = None) -> None:
     view = snapshot(data, read_registry(), repository, now or datetime.now(timezone.utc))
     write_text(site / "status.svg", svg(view))
+    for integration in sorted({row["integration"] for row in view["integrations"]}):
+        write_text(site / "badges" / f"{integration}.svg", badge_svg(view, integration))
     write_text(site / "README.md", markdown(view))
     write_object(site / "status.json", view)
 

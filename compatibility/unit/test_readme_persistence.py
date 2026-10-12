@@ -111,8 +111,9 @@ def test_refresh_initializes_only_status_assets_and_is_idempotent(dashboard_repo
     result = invoke(source, plan, tmp_path / "missing")
     assert result.returncode == 0, result.stderr
     files = git(origin, "ls-tree", "-r", "--name-only", "compatibility-data").stdout.split()
-    assert files == ["site/README.md", "site/status.json", "site/status.svg"]
     view = json.loads(git(origin, "show", "compatibility-data:site/status.json").stdout)
+    badges = {f"site/badges/{row['integration']}.svg" for row in view["integrations"]}
+    assert set(files) == {"site/README.md", "site/status.json", "site/status.svg"} | badges
     assert view["latest_workflow"] is None
     assert all(row["state"] == "Not tested" for row in view["integrations"])
     revision = git(origin, "rev-parse", "compatibility-data").stdout
@@ -143,6 +144,10 @@ def test_evidence_and_snapshot_are_published_together_without_rewriting_records(
             "state"
         ]
         == "Working"
+    )
+    assert (
+        "pymongo: Working"
+        in git(origin, "show", "compatibility-data:site/badges/pymongo.svg").stdout
     )
     revision = git(origin, "rev-parse", "compatibility-data").stdout
     record["tests"][0]["outcome"] = "failed"
@@ -192,6 +197,10 @@ def test_concurrent_newer_failure_survives_a_retry_of_an_older_success(
             "state"
         ]
         == "Failing"
+    )
+    assert (
+        "pymongo: Failing"
+        in git(origin, "show", "compatibility-data:site/badges/pymongo.svg").stdout
     )
     assert not list(tmp_path.glob("compat-dashboard.*"))
 
