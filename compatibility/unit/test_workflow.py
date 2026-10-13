@@ -3,6 +3,7 @@
 
 """Keep manual runs read-only without turning failures into green jobs."""
 
+import json
 import os
 import re
 import subprocess
@@ -149,6 +150,8 @@ def test_actual_workflow_script_handles_defaults_and_dispatch_inputs(
             "DETECTION_ID": "a" * 64 if watcher else "",
             "DISPATCH_ID": "b" * 32 if watcher else "",
             "EXPECTED_ARTIFACTS": ",".join(["c" * 64, "d" * 64]) if watcher else "",
+            "NPM_BUNDLE": "",
+            "EXPECTED_NPM_BUNDLE_SHA256": "",
             "GITHUB_SERVER_URL": "https://github.com",
             "GITHUB_REPOSITORY": "example/project",
             "GITHUB_RUN_ID": "42",
@@ -235,6 +238,48 @@ def test_failed_runs_keep_their_evidence_and_fail_the_job(workflow):
     assert upload["with"]["path"] == "results/"
     for variable in ("integration", "version", "documentdb_version", "demonstration"):
         assert suite["env"][variable.upper()] == "${{ matrix." + variable + " }}"
+
+
+def test_candidate_bundle_is_passed_as_data_without_shell_interpretation(workflow, tmp_path):
+    suite = next(step for step in workflow["jobs"]["test"]["steps"] if step.get("id") == "suite")
+    bundle = json.dumps({"lockfile": {"description": "$(touch unexpected) `touch unexpected`"}})
+    captured = tmp_path / "arguments"
+    capture = 'python() { printf "%s\\0" "$@" > "$CAPTURED_ARGUMENTS"; }\n'
+    environment = {
+        **os.environ,
+        "INTEGRATION": "nodejs",
+        "VERSION": "7.99.0",
+        "DOCUMENTDB_VERSION": "0.117.0",
+        "DEMONSTRATION": "false",
+        "DETECTION_ID": "a" * 64,
+        "EXPECTED_ARTIFACTS": "b" * 64,
+        "NPM_BUNDLE": bundle,
+        "EXPECTED_NPM_BUNDLE_SHA256": "c" * 64,
+        "RUNNER_TEMP": str(tmp_path),
+        "CAPTURED_ARGUMENTS": str(captured),
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_REPOSITORY": "example/project",
+        "GITHUB_RUN_ID": "42",
+        "GITHUB_RUN_ATTEMPT": "1",
+    }
+    process = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", capture + suite["run"]],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert process.returncode == 0, process.stderr
+    retained = tmp_path / "compatibility-npm-candidate.json"
+    assert retained.read_text() == bundle and not (tmp_path / "unexpected").exists()
+    arguments = captured.read_bytes().decode().split("\0")[:-1]
+    assert arguments[-4:] == [
+        "--npm-bundle",
+        str(retained),
+        "--expected-npm-bundle-sha256",
+        "c" * 64,
+    ]
 
 
 def test_combined_reporting_runs_after_test_and_download_failures(workflow):

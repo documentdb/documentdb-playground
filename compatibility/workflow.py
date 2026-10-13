@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from compatibility.contracts import read_registry
+from compatibility.contracts import read_registry, version_allowed
 from compatibility.publish import render
 from compatibility.readme import markdown_cell
 from compatibility.results import (
@@ -32,6 +32,8 @@ def select_runs(
     version: str | None,
     documentdb_version: str,
     demonstration: bool = False,
+    *,
+    upstream: bool = False,
 ) -> list[dict[str, Any]]:
     """Resolve each enabled integration's own default before expanding the matrix."""
     if documentdb_version not in registry["documentdb"]:
@@ -51,7 +53,7 @@ def select_runs(
     for name in sorted(names):
         spec = registry["integrations"][name]
         selected = version or spec["default_version"]
-        if len(selected) > 40 or not re.fullmatch(spec["version_pattern"], selected):
+        if not version_allowed(spec, selected, upstream=upstream):
             raise ValueError(f"Requested version is outside the policy for {name}")
         runs.append(
             {
@@ -73,6 +75,7 @@ def collect_report(
     expected_run_url: str | None = None,
     summary: Path | None = None,
     detection_id: str | None = None,
+    expected_npm_bundle_sha256: str | None = None,
 ) -> bool:
     """Retain valid envelopes and expose rejected or absent evidence for every selected job."""
     if output.exists() or output.is_symlink():
@@ -110,6 +113,10 @@ def collect_report(
                 result_key(result) != key
                 or result["trigger"] != expected_trigger
                 or result.get("detection_id") != detection_id
+                or (
+                    expected_npm_bundle_sha256 is not None
+                    and result["upstream"].get("npm_bundle_sha256") != expected_npm_bundle_sha256
+                )
             ):
                 raise ValueError("Result does not match the selected integration run")
             validate_incoming_result(result, registry, expected_run_url)
@@ -120,12 +127,17 @@ def collect_report(
     success = not errors and all(row["state"] == "Working" for row in rows)
     report = {
         "schema_version": 1,
+        "trigger": "upstream_release" if detection_id is not None else "manual",
         "success": success,
         "errors": errors,
         "integrations": [
             {key: value for key, value in row.items() if key != "history"} for row in rows
         ],
     }
+    if detection_id is not None:
+        report["detection_id"] = detection_id
+    if expected_npm_bundle_sha256 is not None:
+        report["npm_bundle_sha256"] = expected_npm_bundle_sha256
     (output / "summary.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     lines = [
         "## Ecosystem compatibility",
@@ -180,13 +192,20 @@ def main() -> int:
             command.add_argument("--output", type=Path, required=True)
             command.add_argument("--expected-run-url")
             command.add_argument("--summary", type=Path)
+            command.add_argument("--expected-npm-bundle-sha256")
     args = parser.parse_args()
     try:
         registry = read_registry()
+        upstream = args.detection_id is not None or args.dispatch_id is not None
         runs = select_runs(
-            registry, args.integration, args.version, args.documentdb_version, args.demonstration
+            registry,
+            args.integration,
+            args.version,
+            args.documentdb_version,
+            args.demonstration,
+            upstream=upstream,
         )
-        if args.detection_id is not None or args.dispatch_id is not None:
+        if upstream:
             if (
                 not re.fullmatch(r"[a-f0-9]{64}", args.detection_id or "")
                 or not re.fullmatch(r"[a-f0-9]{32}", args.dispatch_id or "")
@@ -197,15 +216,23 @@ def main() -> int:
                     "Watcher provenance requires one normal profile and both valid IDs"
                 )
             if args.command == "matrix":
-                artifacts = validate_dispatch(registry, runs, args.detection_id, args.dispatch_id)
+                prepared = validate_dispatch(registry, runs, args.detection_id, args.dispatch_id)
                 runs[0].update(
                     trigger="upstream_release",
                     detection_id=args.detection_id,
-                    artifact_sha256s=artifacts,
+                    **prepared,
                 )
         if args.command == "matrix":
             print(json.dumps({"include": runs}, separators=(",", ":")))
             return 0
+        npm_release = (
+            upstream and registry["integrations"][runs[0]["integration"]]["runtime"] == "nodejs"
+        )
+        if npm_release:
+            if not re.fullmatch(r"[a-f0-9]{64}", args.expected_npm_bundle_sha256 or ""):
+                raise ValueError("npm release reports require the planned candidate bundle hash")
+        elif args.expected_npm_bundle_sha256 is not None:
+            raise ValueError("A candidate bundle hash requires one recorded npm release")
         success = collect_report(
             args.input,
             args.output,
@@ -214,6 +241,7 @@ def main() -> int:
             expected_run_url=args.expected_run_url,
             summary=args.summary,
             detection_id=args.detection_id,
+            expected_npm_bundle_sha256=args.expected_npm_bundle_sha256,
         )
     except (OSError, ValueError, KeyError, TypeError, RequestError) as error:
         print(f"Invalid compatibility workflow request: {error}", file=sys.stderr)

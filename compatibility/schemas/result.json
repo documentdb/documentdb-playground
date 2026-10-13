@@ -56,6 +56,8 @@
         "actual_version": {"type": ["string", "null"], "pattern": "^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$"},
         "wheel_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
         "artifact_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "npm_bundle_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "npm_bundle": {"type": "object"},
         "runtime": {"$ref": "#/$defs/runtime"},
         "client_image": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
         "python_version": {"type": ["string", "null"], "pattern": "^3\\.12\\.[0-9]+$"},

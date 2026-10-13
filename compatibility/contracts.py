@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -19,12 +20,50 @@ from packaging.version import Version
 ROOT = Path(__file__).resolve().parent.parent
 DEMONSTRATION_TEST = "test_failure_demonstration"
 RUNTIME_PREFIXES = {"python": "3.12.", "nodejs": "24."}
+MAX_NPM_BUNDLE_BYTES = 64 * 1024
 PYTHON_PLATFORMS = (
     "manylinux_2_28_x86_64",
     "manylinux_2_17_x86_64",
     "manylinux2014_x86_64",
     "manylinux1_x86_64",
 )
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> None:
+        return None
+
+
+def canonical_bytes(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def json_digest(value: Any) -> str:
+    return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def npm_bundle_digest(bundle: dict[str, Any]) -> str:
+    validate_schema(bundle, "npm-bundle")
+    contents = canonical_bytes(bundle)
+    if len(contents) > MAX_NPM_BUNDLE_BYTES:
+        raise ValueError("npm candidate bundle exceeded its size limit")
+    return hashlib.sha256(contents).hexdigest()
+
+
+def version_allowed(spec: dict[str, Any], version: str, *, upstream: bool = False) -> bool:
+    pattern = (
+        spec.get("watch_version_pattern", spec["version_pattern"])
+        if upstream
+        else spec["version_pattern"]
+    )
+    return bool(
+        len(version) <= 40
+        and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version)
+        and re.fullmatch(pattern, version)
+        and (not upstream or Version(version) >= Version(spec["default_version"]))
+    )
 
 
 def validate_schema(value: Any, name: str) -> None:
@@ -46,6 +85,8 @@ def read_registry(
     for name, integration in registry["integrations"].items():
         if not re.fullmatch(integration["version_pattern"], integration["default_version"]):
             raise ValueError(f"Default version is outside the policy for {name}")
+        if not version_allowed(integration, integration["default_version"], upstream=True):
+            raise ValueError(f"Default version is outside the watcher policy for {name}")
         for key in ("test_file", "demonstration_file"):
             test_file = (root / integration[key]).resolve()
             allowed = (root / "compatibility" / "integrations" / name).resolve()
@@ -89,6 +130,20 @@ def validate_result(result: dict[str, Any], spec: dict[str, Any] | None = None) 
     if not set(identifiers).issubset(result["expected_tests"]):
         raise ValueError("Result contains an undeclared scenario")
     runtime = result_runtime(result)
+    bundle = result["upstream"].get("npm_bundle")
+    bundle_sha256 = result["upstream"].get("npm_bundle_sha256")
+    npm_release = (
+        runtime["name"] == "nodejs"
+        and result["trigger"] == "upstream_release"
+        and "detection_id" in result
+    )
+    if bundle is not None or bundle_sha256 is not None:
+        if not npm_release:
+            raise ValueError("npm candidate provenance requires a recorded upstream release")
+        if bundle is not None and npm_bundle_digest(bundle) != bundle_sha256:
+            raise ValueError("npm candidate bundle does not match its recorded identity")
+    if npm_release and bundle_sha256 is None:
+        raise ValueError("npm upstream results require a candidate bundle identity")
     if runtime["version"] is not None and not runtime["version"].startswith(
         RUNTIME_PREFIXES[runtime["name"]]
     ):
@@ -162,6 +217,11 @@ def compatibility_state(result: dict[str, Any]) -> str:
         or not result["upstream"]["client_image"]
         or not result_runtime(result)["version"]
         or not result["upstream"]["dependencies"]
+        or (
+            result["trigger"] == "upstream_release"
+            and result_runtime(result)["name"] == "nodejs"
+            and not result["upstream"].get("npm_bundle")
+        )
     ):
         return "Not tested"
     outcomes = {test["id"]: test["outcome"] for test in result["tests"]}
@@ -188,7 +248,14 @@ def suite_files(integration: str, root: Path = ROOT) -> list[Path]:
     for pattern in ("*.py", "*.cjs", "package*.json", "requirements.txt"):
         files.extend(adapter.glob(pattern))
     if any(path.suffix == ".cjs" for path in files):
-        files.extend([root / "compatibility" / name for name in ("client.cjs", "report.cjs")])
+        files.extend(root / "compatibility" / name for name in ("client.cjs", "report.cjs"))
+    candidate_files = [root / "compatibility" / "schemas" / "npm-bundle.json"]
+    if any(path.suffix == ".cjs" for path in files):
+        candidate_files.append(root / "compatibility" / "resolve-npm.cjs")
+    # Historical source revisions predate candidate preparation.
+    files.extend(
+        path for path in candidate_files if root == ROOT or path.exists() or path.is_symlink()
+    )
     for path in files:
         if path.is_symlink():
             raise ValueError("Suite files must not be symbolic links")

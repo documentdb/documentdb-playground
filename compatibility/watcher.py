@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: MIT
 
-"""Discover bounded PyMongo releases, retain AI context, and dispatch reviewed profiles."""
+"""Discover bounded registry releases, retain AI context, and dispatch frozen profiles."""
 
 from __future__ import annotations
 
@@ -11,12 +11,13 @@ import json
 import os
 import re
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 from packaging.specifiers import SpecifierSet
 from packaging.tags import compatible_tags, cpython_tags
@@ -26,23 +27,35 @@ from packaging.version import Version
 from compatibility.contracts import (
     PYTHON_PLATFORMS,
     ROOT,
+    canonical_bytes,
+    json_digest,
+    npm_bundle_digest,
     read_registry,
     suite_digest,
     timestamp,
     validate_schema,
+    version_allowed,
 )
+from compatibility.npm import (
+    REGISTRY,
+    node_image,
+    prepare_node_client,
+    validate_npm_bundle,
+    validate_registry_url,
+)
+from compatibility.runner import LABEL, cleanup, command
 from compatibility.watcher_state import (
     GitHub,
     GitLedger,
     RequestError,
-    json_digest,
     request_json,
 )
 
-UPSTREAM = "mongodb/mongo-python-driver"
 WORKFLOW = "compatibility.yml"
 MAX_DISPATCHES = 3
 MAX_ATTEMPTS = 3
+MAX_UPSTREAMS = 10
+MAX_RELEASES = 30
 PROMPT = ROOT / ".github/workflows/compatibility-watcher.md"
 IDENTITY_FIELDS = (
     "integration",
@@ -109,20 +122,25 @@ class Context:
 
 
 def detection_key(entry: dict[str, Any]) -> str:
-    return json_digest({key: entry[key] for key in IDENTITY_FIELDS})
+    identity = {key: entry[key] for key in IDENTITY_FIELDS}
+    if "npm_bundle" in entry:
+        identity["npm_bundle_sha256"] = npm_bundle_digest(entry["npm_bundle"])
+    return json_digest(identity)
 
 
-def watched_spec(registry: dict[str, Any]) -> dict[str, Any] | None:
-    spec = registry["integrations"].get("pymongo")
-    if spec is None or not spec["enabled"]:
-        return None
-    if (
-        spec["package"] != "pymongo"
-        or spec["runtime"] != "python"
-        or spec["repository"] != f"https://github.com/{UPSTREAM}"
-    ):
-        raise ValueError("The initial watcher supports only the reviewed official PyMongo profile")
-    return dict(spec)
+def watched_specs(registry: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    specs = {
+        name: spec
+        for name, spec in registry["integrations"].items()
+        if spec["enabled"] and "watch_version_pattern" in spec
+    }
+    if len(specs) > MAX_UPSTREAMS:
+        raise ValueError("Watcher integration count exceeded its reviewed bound")
+    return specs
+
+
+def upstream_repository(spec: dict[str, Any]) -> str:
+    return str(spec["repository"]).removeprefix("https://github.com/")
 
 
 def release_version(release: dict[str, Any], spec: dict[str, Any]) -> str | None:
@@ -137,25 +155,25 @@ def release_version(release: dict[str, Any], spec: dict[str, Any]) -> str | None
         return None
     parsed = Version(tag.removeprefix("v"))
     version = f"{parsed.major}.{parsed.minor}.{parsed.micro}"
-    if not re.fullmatch(spec["version_pattern"], version) or parsed < Version(
-        spec["default_version"]
-    ):
+    if not version_allowed(spec, version, upstream=True):
         return None
     if (
         type(release["id"]) is not int
         or release["id"] < 1
-        or release["html_url"] != f"https://github.com/{UPSTREAM}/releases/tag/{tag}"
+        or release["html_url"] != f"{spec['repository']}/releases/tag/{tag}"
         or timestamp(release["published_at"]) > now() + timedelta(minutes=5)
     ):
         raise ValueError("Release identity or publication time does not match the official source")
     return version
 
 
-def eligible_artifacts(metadata: dict[str, Any], version: str) -> list[dict[str, str]]:
-    if metadata["info"]["name"] != "pymongo" or Version(metadata["info"]["version"]) != Version(
-        version
-    ):
-        raise ValueError("PyPI metadata does not describe the selected PyMongo release")
+def eligible_artifacts(
+    metadata: dict[str, Any], version: str, spec: dict[str, Any]
+) -> list[dict[str, str]]:
+    if metadata["info"]["name"] != spec["package"] or Version(
+        metadata["info"]["version"]
+    ) != Version(version):
+        raise ValueError("PyPI metadata does not describe the selected package release")
     if not SpecifierSet(metadata["info"].get("requires_python") or "").contains("3.12.0"):
         return []
     supported = set(cpython_tags((3, 12), abis=["cp312"], platforms=list(PYTHON_PLATFORMS)))
@@ -167,7 +185,7 @@ def eligible_artifacts(metadata: dict[str, Any], version: str) -> list[dict[str,
         if asset["packagetype"] != "bdist_wheel" or asset["yanked"]:
             continue
         name, published, _, tags = parse_wheel_filename(asset["filename"])
-        if name != "pymongo" or published != Version(version):
+        if name != spec["package"].replace("_", "-") or published != Version(version):
             raise ValueError("Published wheel identity disagrees with PyPI release metadata")
         if not tags.intersection(supported):
             continue
@@ -182,37 +200,152 @@ def eligible_artifacts(metadata: dict[str, Any], version: str) -> list[dict[str,
     return sorted(artifacts, key=lambda asset: asset["filename"])
 
 
-def package_metadata(version: str) -> dict[str, Any]:
-    value = request_json(f"https://pypi.org/pypi/pymongo/{quote(version, safe='')}/json")
+def package_metadata(spec: dict[str, Any], version: str) -> dict[str, Any]:
+    package = quote(spec["package"], safe="")
+    selected = quote(version, safe="")
+    url = (
+        f"https://pypi.org/pypi/{package}/{selected}/json"
+        if spec["runtime"] == "python"
+        else f"{REGISTRY}/{package}/{selected}"
+    )
+    value = request_json(url)
     if not isinstance(value, dict):
-        raise ValueError("PyPI did not return a release object")
+        raise ValueError("Package registry did not return a release object")
     return value
 
 
+def npm_release(
+    metadata: dict[str, Any], spec: dict[str, Any], version: str
+) -> dict[str, str] | None:
+    repository = metadata.get("repository")
+    if isinstance(repository, dict):
+        repository = repository.get("url")
+    source = urlsplit(repository.removeprefix("git+")) if isinstance(repository, str) else None
+    if (
+        metadata.get("name") != spec["package"]
+        or metadata.get("version") != version
+        or source is None
+        or source.scheme not in {"https", "git", "ssh"}
+        or source.netloc.lower() != ("git@github.com" if source.scheme == "ssh" else "github.com")
+        or source.query
+        or source.fragment
+        or f"https://github.com{source.path.removesuffix('.git')}".lower()
+        != spec["repository"].lower()
+    ):
+        raise ValueError("npm metadata does not describe the official selected package release")
+    if metadata.get("deprecated"):
+        return None
+    archive = metadata["dist"]["tarball"]
+    integrity = metadata["dist"]["integrity"]
+    validate_registry_url(archive)
+    if (
+        archive != f"{REGISTRY}/{spec['package']}/-/{spec['package']}-{version}.tgz"
+        or not isinstance(integrity, str)
+        or not re.fullmatch(r"sha512-[A-Za-z0-9+/]{86}==", integrity)
+    ):
+        raise ValueError("npm release requires an exact registry archive and SHA-512 integrity")
+    return {"resolved": archive, "integrity": integrity}
+
+
+def npm_bundle_matches(
+    bundle: dict[str, Any], spec: dict[str, Any], version: str, published: dict[str, str]
+) -> bool:
+    validate_npm_bundle(bundle, spec, version)
+    selected = bundle["lockfile"]["packages"][f"node_modules/{spec['package']}"]
+    return all(selected[key] == value for key, value in published.items())
+
+
+def prepare_npm_candidate(
+    spec: dict[str, Any], version: str, published: dict[str, str]
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Resolve once without credentials, mounts, package scripts, or host Node tooling."""
+    identifier = uuid.uuid4().hex
+    image = node_image(spec)
+    try:
+        resolved = command(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--platform",
+                "linux/amd64",
+                "--label",
+                f"{LABEL}={identifier}",
+                "--read-only",
+                "--user",
+                "1000:1000",
+                "--tmpfs",
+                "/tmp:size=64m,uid=1000,gid=1000",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                "--memory=512m",
+                "--cpus=1",
+                "--pids-limit=128",
+                "--workdir",
+                "/tmp",
+                image,
+                "node",
+                "-e",
+                (ROOT / "compatibility/resolve-npm.cjs").read_text(),
+                spec["package"],
+                version,
+            ],
+            timeout=180,
+        )
+    finally:
+        errors = cleanup(identifier, "")
+        if errors:
+            raise RuntimeError("npm resolver cleanup failed: " + "; ".join(errors))
+    bundle = {**json.loads(resolved.stdout), "resolver_image": image}
+    if not npm_bundle_matches(bundle, spec, version, published):
+        raise ValueError("Resolved npm archive differs from the discovered release")
+    with tempfile.TemporaryDirectory(prefix="compatibility-npm-") as directory:
+        digest = prepare_node_client(Path(directory), spec, version, npm_bundle=bundle)
+    return bundle, [{"filename": f"{spec['package']}-{version}.tgz", "sha256": digest}]
+
+
+def npm_candidate(
+    ledger: GitLedger,
+    integration: str,
+    spec: dict[str, Any],
+    version: str,
+    published: dict[str, str],
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    digest = suite_digest(integration, spec)
+    for entry in ledger.state["entries"].values():
+        if (
+            entry["integration"] == integration
+            and entry["version"] == version
+            and entry["suite_digest"] == digest
+            and "npm_bundle" in entry
+            and npm_bundle_matches(entry["npm_bundle"], spec, version, published)
+        ):
+            return entry["npm_bundle"], entry["artifacts"]
+    return prepare_npm_candidate(spec, version, published)
+
+
 def candidate(
+    integration: str,
     release: dict[str, Any],
     metadata: dict[str, Any],
     version: str,
     database_version: str,
     registry: dict[str, Any],
     context: Context,
-) -> dict[str, Any] | None:
-    spec = watched_spec(registry)
-    if spec is None:
-        return None
-    artifacts = eligible_artifacts(metadata, version)
-    if not artifacts:
-        return None
+    artifacts: list[dict[str, str]],
+    bundle: dict[str, Any] | None,
+) -> dict[str, Any]:
+    spec = registry["integrations"][integration]
     notes = release.get("body") or ""
     if not isinstance(notes, str):
         raise ValueError("Release notes must be text")
-    return {
-        "integration": "pymongo",
+    entry = {
+        "integration": integration,
         "version": version,
         "documentdb_version": database_version,
         "documentdb_image": registry["documentdb"][database_version]["image"],
         "profile": spec["profile"],
-        "suite_digest": suite_digest("pymongo", spec),
+        "suite_digest": suite_digest(integration, spec),
         "artifacts": artifacts,
         "release": {
             "id": release["id"],
@@ -232,10 +365,13 @@ def candidate(
         "analysis": None,
         "error": None,
     }
+    if bundle is not None:
+        entry["npm_bundle"] = bundle
+    return entry
 
 
 def discover(ledger: GitLedger, registry: dict[str, Any], context: Context) -> list[dict[str, Any]]:
-    spec = watched_spec(registry)
+    specs = watched_specs(registry)
     observations: list[dict[str, str]] = []
     ledger.state["last_scan"] = {
         "run_url": context.run_url,
@@ -244,29 +380,60 @@ def discover(ledger: GitLedger, registry: dict[str, Any], context: Context) -> l
         "error": None,
     }
     try:
-        if spec is not None:
-            releases = ledger.api.request("GET", f"/repos/{UPSTREAM}/releases?per_page=30")
-            if not isinstance(releases, list) or len(releases) > 30:
+        feeds = {}
+        for integration, spec in specs.items():
+            releases = ledger.api.request(
+                "GET", f"/repos/{upstream_repository(spec)}/releases?per_page={MAX_RELEASES}"
+            )
+            if not isinstance(releases, list) or len(releases) > MAX_RELEASES:
                 raise ValueError("Upstream release feed exceeded its reviewed bound")
-            added = 0
-            for release in releases:
+            feeds[integration] = releases
+        added = 0
+        for index in range(MAX_RELEASES):
+            for integration, spec in specs.items():
+                if index >= len(feeds[integration]):
+                    continue
+                release = feeds[integration][index]
                 version = release_version(release, spec)
-                observation = {"tag": str(release["tag_name"])[:100], "decision": "outside policy"}
+                observation = {
+                    "integration": integration,
+                    "tag": str(release["tag_name"])[:100],
+                    "decision": "outside policy",
+                }
                 observations.append(observation)
                 if version is None:
                     continue
                 try:
-                    metadata = package_metadata(version)
+                    metadata = package_metadata(spec, version)
                 except RequestError as error:
                     if error.status != 404:
                         raise
-                    observation["decision"] = "awaiting published PyPI metadata"
+                    observation["decision"] = "awaiting published package metadata"
                     continue
-                observation["decision"] = "no eligible, non-yanked Python 3.12 baseline wheel"
-                for database in sorted(registry["documentdb"], key=Version, reverse=True):
-                    entry = candidate(release, metadata, version, database, registry, context)
-                    if entry is None:
+                bundle = None
+                if spec["runtime"] == "python":
+                    artifacts = eligible_artifacts(metadata, version, spec)
+                    observation["decision"] = "no eligible, non-yanked Python 3.12 baseline wheel"
+                else:
+                    published = npm_release(metadata, spec, version)
+                    if published is None:
+                        observation["decision"] = "deprecated npm release"
                         continue
+                    bundle, artifacts = npm_candidate(ledger, integration, spec, version, published)
+                if not artifacts:
+                    continue
+                for database in sorted(registry["documentdb"], key=Version, reverse=True):
+                    entry = candidate(
+                        integration,
+                        release,
+                        metadata,
+                        version,
+                        database,
+                        registry,
+                        context,
+                        artifacts,
+                        bundle,
+                    )
                     identifier = detection_key(entry)
                     observation["decision"] = "eligible"
                     if identifier not in ledger.state["entries"]:
@@ -276,7 +443,9 @@ def discover(ledger: GitLedger, registry: dict[str, Any], context: Context) -> l
                         break
                 if added >= MAX_DISPATCHES:
                     break
-    except (RequestError, ValueError, KeyError, TypeError) as error:
+            if added >= MAX_DISPATCHES:
+                break
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
         ledger.state["last_scan"]["error"] = str(error)[:500]
         ledger.save()
         raise
@@ -285,16 +454,16 @@ def discover(ledger: GitLedger, registry: dict[str, Any], context: Context) -> l
         if (
             entry["status"] == "pending"
             and entry["analysis"] is None
-            and spec is not None
             and current_identity(entry, registry)
         ):
             entry["review_run_url"] = context.run_url
             selected.append(
                 {
                     "detection_id": identifier,
+                    "integration": entry["integration"],
                     "version": entry["version"],
                     "release": entry["release"],
-                    "scenario_ids": spec["expected_tests"],
+                    "scenario_ids": specs[entry["integration"]]["expected_tests"],
                 }
             )
             if len(selected) == MAX_DISPATCHES:
@@ -369,16 +538,18 @@ def assess(ledger: GitLedger, registry: dict[str, Any], context: Context, output
 
 
 def current_identity(entry: dict[str, Any], registry: dict[str, Any]) -> bool:
-    spec = watched_spec(registry)
+    spec = watched_specs(registry).get(entry["integration"])
     database = registry["documentdb"].get(entry["documentdb_version"])
     return bool(
         spec is not None
         and database is not None
-        and re.fullmatch(spec["version_pattern"], entry["version"])
-        and Version(entry["version"]) >= Version(spec["default_version"])
+        and version_allowed(spec, entry["version"], upstream=True)
         and entry["documentdb_image"] == database["image"]
         and entry["profile"] == spec["profile"]
-        and entry["suite_digest"] == suite_digest("pymongo", spec)
+        and entry["suite_digest"] == suite_digest(entry["integration"], spec)
+        and (("npm_bundle" in entry) == (spec["runtime"] == "nodejs"))
+        and entry["release"]["url"]
+        == f"{spec['repository']}/releases/tag/{entry['release']['tag']}"
     )
 
 
@@ -500,15 +671,23 @@ def dispatch(ledger: GitLedger, registry: dict[str, Any], context: Context) -> b
             continue
         if used >= MAX_DISPATCHES:
             break
-        release = ledger.api.request("GET", f"/repos/{UPSTREAM}/releases/{entry['release']['id']}")
-        spec = watched_spec(registry)
+        spec = watched_specs(registry).get(entry["integration"])
         if spec is None:
             raise ValueError("The watched integration is no longer enabled")
-        if (
-            release_version(release, spec) != entry["version"]
-            or eligible_artifacts(package_metadata(entry["version"]), entry["version"])
-            != entry["artifacts"]
-        ):
+        release = ledger.api.request(
+            "GET", f"/repos/{upstream_repository(spec)}/releases/{entry['release']['id']}"
+        )
+        valid = release_version(release, spec) == entry["version"]
+        if valid:
+            metadata = package_metadata(spec, entry["version"])
+            if spec["runtime"] == "python":
+                valid = eligible_artifacts(metadata, entry["version"], spec) == entry["artifacts"]
+            else:
+                published = npm_release(metadata, spec, entry["version"])
+                valid = published is not None and npm_bundle_matches(
+                    entry["npm_bundle"], spec, entry["version"], published
+                )
+        if not valid:
             entry.update(
                 status="superseded", error="The upstream release or eligible artifacts changed"
             )
@@ -601,7 +780,7 @@ def validate_dispatch(
     runs: list[dict[str, Any]],
     identifier: str,
     dispatch_id: str,
-) -> list[str]:
+) -> dict[str, Any]:
     if (
         not re.fullmatch(r"[a-f0-9]{64}", identifier)
         or not re.fullmatch(r"[a-f0-9]{32}", dispatch_id)
@@ -629,7 +808,18 @@ def validate_dispatch(
         raise ValueError(
             "Dispatch does not match durable pending work and current reviewed execution inputs"
         )
-    return sorted({asset["sha256"] for asset in entry["artifacts"]})
+    prepared: dict[str, Any] = {
+        "artifact_sha256s": sorted({asset["sha256"] for asset in entry["artifacts"]})
+    }
+    if "npm_bundle" in entry:
+        digest = validate_npm_bundle(
+            entry["npm_bundle"], registry["integrations"][entry["integration"]], entry["version"]
+        )
+        prepared.update(
+            npm_bundle_sha256=digest,
+            npm_bundle=canonical_bytes(entry["npm_bundle"]).decode(),
+        )
+    return prepared
 
 
 def main() -> int:
@@ -662,7 +852,7 @@ def main() -> int:
         elif not dispatch(ledger, registry, context):
             return 1
         validate_schema(ledger.state, "watcher")
-    except (OSError, ValueError, KeyError, TypeError, RequestError) as error:
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
         print(f"Compatibility watcher failed: {error}", file=sys.stderr)
         return 1
     return 0

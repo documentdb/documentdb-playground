@@ -37,14 +37,17 @@ packages disabled. The client verifies installed dependency versions and records
 their SHA-256 hashes. Shared JavaScript execution and reporting live in
 `compatibility/client.cjs` and `compatibility/report.cjs`, separate from adapters.
 
-The Node.js and Mongoose profiles accept only their reviewed locked versions.
-To select another, update the manifest in `compatibility/integrations/nodejs` or
+Manual Node.js and Mongoose runs accept only their reviewed locked versions.
+To change a manual baseline, update the manifest in `compatibility/integrations/nodejs` or
 `compatibility/integrations/mongoose`, regenerate that adapter's lockfile using Node 24 and
 `npm install --package-lock-only --ignore-scripts --engine-strict --omit=optional`,
 and update the registry default and version policy. Review dependency changes and
 rerun both the normal and demonstration profiles.
 Mongoose's transitive MongoDB driver is independently locked and recorded as a
 dependency, never substituted for the Mongoose package version.
+Authorized upstream runs instead use a frozen candidate manifest and lockfile
+recorded by the watcher. They do not modify the checked-in baselines or broaden
+manual version overrides.
 
 ## Coverage
 
@@ -287,14 +290,42 @@ accepts only scheduled or manual execution on that branch. It runs daily at
 serialized. Disable the enablement variable to stop future work, and explicitly
 cancel an in-flight run when immediate suspension is needed.
 
-PyMongo release discovery reads at most the latest 30 releases from the official
-`mongodb/mongo-python-driver` GitHub repository and verifies their PyPI metadata.
-Only stable releases at least as new as the reviewed baseline, within the
-registry's version policy, and with eligible non-yanked wheels are considered.
+Release discovery uses each enabled registry entry with a `watch_version_pattern`.
+That optional field opts a profile into discovery and defines its automatic version
+range independently of the manual `version_pattern`. The checked-in policies admit
+stable releases at least as new as each baseline within its current major version.
+Prereleases and new majors are not selected automatically.
+
+The watcher reads at most 30 releases from each registered upstream GitHub
+repository, for at most ten watched integrations. It examines those feeds in
+round-robin order rather than draining one integration's release backlog first.
+GitHub release identities must match the registered repository.
+Package names, versions, and artifacts are checked against the corresponding
+official package registry. Unpublished metadata is recorded and reconsidered
+on later scans.
+
+Python discovery requires eligible non-yanked wheels from PyPI.
 The wheel tags match the runner's Python 3.12 Linux x64 download policy.
 `Requires-Python` must admit **3.12.0**, a conservative floor: a release requiring
 a newer 3.12 patch is not automatically selected even if a particular image
-could run it. Unpublished metadata is recorded and reconsidered on later scans.
+could run it.
+
+For npm, the package's registry repository must match the registered upstream,
+and deprecated releases are excluded. A disposable container using the profile's
+digest-pinned Node image resolves the exact candidate with lifecycle scripts,
+optional installation, auditing, and funding requests disabled. Engine requirements
+are enforced. The resolver has no credentials, checkout mount, or Docker socket;
+only its temporary filesystem is writable. Resolution failures stop discovery
+with an explicit ledger error, not an invented compatibility verdict.
+
+The resulting manifest, lockfile, and resolver image form a bundle capped at
+64 KiB and 100 locked dependencies. Every non-optional archive must pass the
+existing registry-origin and SHA-512 verification before the candidate is recorded.
+The locked root archive must also match the independently fetched release metadata.
+The complete bundle is stored in the Git-backed ledger, and its SHA-256 contributes
+to the detection identity. Rediscovery and retries reuse that bundle instead of
+resolving a newer transitive dependency tree. Changed execution inputs or published
+root artifacts require a new detection.
 
 At most three new version pairs are recorded per invocation. Each detection
 includes the upstream artifacts and hashes, DocumentDB image and version,
@@ -314,12 +345,23 @@ fails or omits a release. Missing analysis is explicitly marked `unavailable`,
 with a warning; failed AI jobs are not turned green. Before dispatch, the code
 revalidates the reviewed execution inputs and official release artifacts.
 An unexpected downloaded artifact is rejected before Docker build or execution.
-Only the planning step reads watcher state. No GitHub or inference token is
-passed to the isolated test client.
+Only the planning step reads watcher state. It passes the validated bundle and
+its hash as bounded matrix data, not executable instructions. The runner checks
+that identity before downloading archives or building a client and installs the
+frozen dependency tree offline. Results retain the bundle and hash alongside the
+actual installed dependencies; report collection checks the planned hash.
+No GitHub or inference token is passed to the isolated test client.
+
+Normal default-branch upstream runs use the same combined reports and README
+publisher as manual runs. Verified candidate results, including compatibility
+failures and incomplete attempts, can therefore update the existing badges
+without changing the default package versions. Merely discovering a release,
+resolving its dependencies, or receiving an AI assessment cannot make a badge green.
 
 ### State, retries, and recovery
 
-The orphan `compatibility-watcher-state` branch contains a single `ledger.json`.
+The orphan `compatibility-watcher-state` branch contains a single `ledger.json`,
+including the frozen npm inputs needed to reproduce its detections.
 Non-force Git reference updates reject concurrent writers. Each reservation is
 persisted before contacting the dispatch API, and the resulting workflow receipt
 is saved afterward. Git history retains earlier scans and state transitions.
@@ -370,8 +412,10 @@ as workflow artifacts, not deployed to a public site.
 
 Adding a package ecosystem to discovery requires a metadata adapter and a
 reviewed version-selection policy compatible with the runner's artifact checks.
-For npm profiles, version selection also requires reviewed manifest and lockfile
-updates.
+Python and npm profiles share the existing metadata and preparation paths. Adding
+an adapter for either runtime requires its registered official package/repository,
+complete scenario contract, and an explicit `watch_version_pattern`; the reviewed
+manual manifest and lockfile remain the default for npm profiles.
 
 ### Regenerate the watcher
 

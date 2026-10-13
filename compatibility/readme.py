@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
-from compatibility.contracts import read_registry, timestamp, validate_schema
+from compatibility.contracts import read_registry, timestamp, validate_schema, version_allowed
 from compatibility.results import (
     RunKey,
     append_result,
@@ -187,6 +187,12 @@ def selected_profiles(
         or not 0 < len(summary["integrations"]) <= 100
     ):
         raise ValueError("Invalid combined report envelope")
+    trigger = summary.get("trigger", "manual")
+    if trigger not in {"manual", "upstream_release"} or (
+        trigger == "upstream_release"
+        and not re.fullmatch(r"[a-f0-9]{64}", summary.get("detection_id") or "")
+    ):
+        raise ValueError("Invalid combined report trigger provenance")
     profiles = []
     modes = set()
     for row in summary["integrations"]:
@@ -197,7 +203,9 @@ def selected_profiles(
         if (
             profile["profile"] != spec["profile"]
             or profile["documentdb_version"] not in registry["documentdb"]
-            or not re.fullmatch(spec["version_pattern"], profile["upstream_version"])
+            or not version_allowed(
+                spec, profile["upstream_version"], upstream=trigger == "upstream_release"
+            )
             or profile in profiles
         ):
             raise ValueError("Combined report does not match the reviewed selection")
@@ -242,10 +250,13 @@ def ingest(
         raise ValueError("Publication directories must not be symbolic links")
     errors = []
     profiles: list[dict[str, Any]] = []
+    expected_detection = None
+    expected_bundle = None
     try:
-        profiles, demonstration = selected_profiles(
-            read_object(incoming / "summary.json"), registry
-        )
+        summary = read_object(incoming / "summary.json")
+        profiles, demonstration = selected_profiles(summary, registry)
+        expected_detection = summary.get("detection_id")
+        expected_bundle = summary.get("npm_bundle_sha256")
         if demonstration:
             print("Demonstration report ignored; normal compatibility evidence is unchanged.")
             return
@@ -267,6 +278,14 @@ def ingest(
                 if path.stem != result["id"] or result["demonstration"]:
                     raise ValueError("Result identity or mode does not match publication")
                 validate_incoming_result(result, registry, attempt["run_url"], root=source_root)
+                if (
+                    expected_detection is not None
+                    and result.get("detection_id") != expected_detection
+                ) or (
+                    expected_bundle is not None
+                    and result["upstream"].get("npm_bundle_sha256") != expected_bundle
+                ):
+                    raise ValueError("Result does not match the report's recorded candidate")
                 profile = profile_from_result(result)
                 if profiles and profile not in profiles:
                     raise ValueError("Result is outside the selected profile set")

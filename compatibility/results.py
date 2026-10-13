@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -22,7 +21,9 @@ from compatibility.contracts import (
     suite_digest,
     timestamp,
     validate_result,
+    version_allowed,
 )
+from compatibility.npm import validate_npm_bundle
 
 RunKey = tuple[str, str, str, str, bool]
 
@@ -59,8 +60,14 @@ def validate_incoming_result(
         raise ValueError("Result does not belong to the publishing workflow run")
     spec = registry["integrations"][result["integration"]]
     validate_result(result, spec)
-    if not re.fullmatch(spec["version_pattern"], result["upstream"]["version"]):
+    if not version_allowed(
+        spec, result["upstream"]["version"], upstream=result["trigger"] == "upstream_release"
+    ):
         raise ValueError("Incoming result is outside the reviewed version policy")
+    if "npm_bundle" in result["upstream"]:
+        validate_npm_bundle(
+            result["upstream"]["npm_bundle"], spec, result["upstream"]["version"], root=root
+        )
     database = registry["documentdb"][result["documentdb"]["version"]]
     if result["documentdb"]["image"] != database["image"]:
         raise ValueError("Incoming result does not reference the reviewed database artifact")
@@ -139,6 +146,11 @@ def dashboard_rows(
                 latest is not None
                 and artifact_sha256(latest)
                 and artifact_sha256(latest) != artifact_sha256(current)
+            )
+            or (
+                latest is not None
+                and latest["upstream"].get("npm_bundle_sha256")
+                != current["upstream"].get("npm_bundle_sha256")
             )
         ):
             state = "Stale"

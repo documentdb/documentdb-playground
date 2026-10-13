@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from compatibility import contracts
 from compatibility.contracts import (
     artifact_sha256,
     compatibility_state,
@@ -17,6 +18,7 @@ from compatibility.contracts import (
     validate_result,
     validate_schema,
 )
+from compatibility.results import validate_incoming_result
 
 pytestmark = pytest.mark.unit
 
@@ -226,6 +228,19 @@ def test_prepared_build_context_preserves_the_reviewed_suite(prepared_context, r
     integration = selection["integration"]
     spec = registry["integrations"][integration]
     assert suite_digest(integration, spec, prepared_context) == suite_digest(integration, spec)
+
+
+def test_historical_source_without_candidate_files_can_still_be_validated(
+    prepared_context, registry, selection, record, monkeypatch
+):
+    integration = selection["integration"]
+    spec = registry["integrations"][integration]
+    (prepared_context / "compatibility/schemas/npm-bundle.json").unlink()
+    record["suite_digest"] = suite_digest(integration, spec, prepared_context)
+    validate_incoming_result(record, registry, root=prepared_context)
+    monkeypatch.setattr(contracts, "ROOT", prepared_context)
+    with pytest.raises(FileNotFoundError):
+        suite_digest(integration, spec, prepared_context)
 
 
 @pytest.mark.parametrize(

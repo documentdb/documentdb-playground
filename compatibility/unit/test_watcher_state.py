@@ -12,7 +12,9 @@ from copy import deepcopy
 
 import pytest
 
+from compatibility import watcher
 from compatibility import watcher_state as state
+from compatibility.contracts import MAX_NPM_BUNDLE_BYTES
 
 pytestmark = pytest.mark.unit
 
@@ -129,6 +131,51 @@ def test_git_ledger_round_trips_an_orphan_data_branch(tmp_path):
     )
 
 
+def test_git_ledger_retains_bounded_npm_inputs_and_rejects_oversized_replacements(
+    tmp_path, registry, npm_bundle
+):
+    spec = registry["integrations"]["nodejs"]
+    version = spec["default_version"]
+    context = watcher.Context(
+        "example/project",
+        "main",
+        "a" * 40,
+        "https://github.com/example/project/actions/runs/42/attempts/1",
+        "unit-model",
+    )
+    release = {
+        "id": 1,
+        "tag_name": f"v{version}",
+        "html_url": f"{spec['repository']}/releases/tag/v{version}",
+        "published_at": "2026-10-01T00:00:00Z",
+        "body": "Release notes",
+    }
+    entry = watcher.candidate(
+        "nodejs",
+        release,
+        {},
+        version,
+        next(iter(registry["documentdb"])),
+        registry,
+        context,
+        [{"filename": f"mongodb-{version}.tgz", "sha256": "b" * 64}],
+        npm_bundle(),
+    )
+    identifier = watcher.detection_key(entry)
+    api = LocalGitAPI(tmp_path / "state.git")
+    ledger = state.GitLedger(api)
+    ledger.state["entries"][identifier] = entry
+    ledger.save()
+    head = ledger.head
+    reloaded = state.GitLedger(api)
+    reloaded.load()
+    assert reloaded.state["entries"][identifier] == entry
+    entry["npm_bundle"]["lockfile"]["description"] = "x" * MAX_NPM_BUNDLE_BYTES
+    with pytest.raises(ValueError, match="size limit"):
+        ledger.save()
+    assert api.git("rev-parse", state.STATE_BRANCH).stdout.decode().strip() == head
+
+
 @pytest.mark.parametrize("existing", [False, True])
 def test_git_state_conflicts_preserve_the_other_writers_evidence(tmp_path, existing):
     api = LocalGitAPI(tmp_path / "state.git")
@@ -199,6 +246,8 @@ def test_invalid_or_full_state_cannot_advance_the_branch(tmp_path, monkeypatch):
         ("https://api.github.com.unreviewed.example/repos/example/project", None),
         ("https://pypi.org/pypi/unreviewed/1.0/json", None),
         ("http://api.github.com/repos/example/project", "unit-token"),
+        ("https://registry.npmjs.org/mongodb/7.7.0", "unit-token"),
+        ("https://registry.npmjs.org/mongodb/7.7.0?redirect=unreviewed", None),
     ],
 )
 def test_unreviewed_sources_never_receive_requests(monkeypatch, url, token):
@@ -230,9 +279,11 @@ def test_metadata_transport_separates_credentials_and_disables_redirects(monkeyp
     monkeypatch.setattr(state.urllib.request, "build_opener", opener)
     state.request_json("https://api.github.com/repos/example/project", token="unit-token")
     state.request_json("https://pypi.org/pypi/pymongo/4.18.0/json")
+    state.request_json("https://registry.npmjs.org/mongodb/7.7.0")
     assert requests[0].get_header("Authorization") == "Bearer unit-token"
     assert requests[0].get_header("X-github-api-version") == "2026-03-10"
     assert requests[1].get_header("Authorization") is None
+    assert requests[2].get_header("Authorization") is None
 
 
 @pytest.mark.parametrize(

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import re
 import urllib.error
@@ -14,7 +13,12 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from compatibility.contracts import validate_schema
+from compatibility.contracts import (
+    NoRedirect,
+    canonical_bytes,
+    npm_bundle_digest,
+    validate_schema,
+)
 
 STATE_BRANCH = "compatibility-watcher-state"
 MAX_STATE_BYTES = 2 * 1024 * 1024
@@ -25,26 +29,11 @@ BOT = {
 }
 
 
-def canonical_bytes(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-
-
-def json_digest(value: Any) -> str:
-    return hashlib.sha256(canonical_bytes(value)).hexdigest()
-
-
 class RequestError(RuntimeError):
     def __init__(self, message: str, status: int | None = None, retryable: bool = False):
         super().__init__(message)
         self.status = status
         self.retryable = retryable
-
-
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(
-        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
-    ) -> None:
-        return None
 
 
 def request_json(
@@ -53,9 +42,20 @@ def request_json(
     parsed = urllib.parse.urlsplit(url)
     if (
         parsed.scheme != "https"
-        or parsed.netloc not in {"api.github.com", "pypi.org"}
+        or parsed.netloc not in {"api.github.com", "pypi.org", "registry.npmjs.org"}
         or (token is not None and parsed.netloc != "api.github.com")
-        or (parsed.netloc == "pypi.org" and not parsed.path.startswith("/pypi/pymongo/"))
+        or (
+            parsed.netloc == "pypi.org"
+            and not re.fullmatch(
+                r"/pypi/[a-z][a-z0-9_-]{0,39}/[0-9]+\.[0-9]+\.[0-9]+/json", parsed.path
+            )
+        )
+        or (
+            parsed.netloc == "registry.npmjs.org"
+            and not re.fullmatch(r"/[a-z][a-z0-9_-]{0,39}/[0-9]+\.[0-9]+\.[0-9]+", parsed.path)
+        )
+        or (parsed.netloc != "api.github.com" and parsed.query)
+        or parsed.fragment
     ):
         raise ValueError("Metadata request is outside the reviewed public sources")
     headers = {"Accept": "application/json", "User-Agent": "documentdb-compatibility"}
@@ -151,11 +151,17 @@ class GitLedger:
         if len(contents) > MAX_STATE_BYTES:
             raise ValueError("Watcher state exceeded its size limit")
         self.state = json.loads(contents)
+        self.validate()
+
+    def validate(self) -> None:
         validate_schema(self.state, "watcher")
+        for entry in self.state["entries"].values():
+            if "npm_bundle" in entry:
+                npm_bundle_digest(entry["npm_bundle"])
 
     def save(self) -> None:
         """Advance only from the loaded parent; conflicts stop before any new dispatch."""
-        validate_schema(self.state, "watcher")
+        self.validate()
         contents = canonical_bytes(self.state)
         if len(contents) > MAX_STATE_BYTES:
             raise ValueError(

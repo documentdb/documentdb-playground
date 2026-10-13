@@ -6,12 +6,20 @@
 import json
 import sys
 from copy import deepcopy
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from compatibility import workflow
-from compatibility.contracts import RUNTIME_PREFIXES, expected_tests, suite_digest, timestamp
+from compatibility import readme, workflow
+from compatibility.contracts import (
+    ROOT,
+    RUNTIME_PREFIXES,
+    expected_tests,
+    npm_bundle_digest,
+    suite_digest,
+    timestamp,
+)
+from compatibility.results import append_result, dashboard_rows
 
 pytestmark = pytest.mark.unit
 RUN_URL = "https://github.com/example/project/actions/runs/42/attempts/3"
@@ -93,6 +101,24 @@ def test_single_integration_default_and_override(registry, selection, other_vers
     ]
 
 
+@pytest.mark.parametrize("integration", ["nodejs", "mongoose"])
+def test_watch_ranges_do_not_broaden_manual_pins(registry, selection, integration):
+    spec = registry["integrations"][integration]
+    major, minor, _ = spec["default_version"].split(".")
+    version = f"{major}.{int(minor) + 1}.0"
+    with pytest.raises(ValueError, match="outside the policy"):
+        workflow.select_runs(registry, integration, version, selection["documentdb_version"])
+    runs = workflow.select_runs(
+        registry, integration, version, selection["documentdb_version"], upstream=True
+    )
+    assert runs[0]["version"] == version
+    for rejected in (f"{int(major) + 1}.0.0", f"{major}.0.0", f"{version}-rc.1"):
+        with pytest.raises(ValueError, match="outside the policy"):
+            workflow.select_runs(
+                registry, integration, rejected, selection["documentdb_version"], upstream=True
+            )
+
+
 @pytest.mark.parametrize(
     ("integration", "version", "database", "error"),
     [
@@ -147,7 +173,7 @@ def test_upstream_matrix_uses_only_ledger_authorized_artifacts(
         assert identifier == "a" * 64 and nonce == "b" * 32
         if not authorized:
             raise ValueError("Fixture ledger rejected this request")
-        return ["c" * 64]
+        return {"artifact_sha256s": ["c" * 64]}
 
     monkeypatch.setattr(workflow, "validate_dispatch", authorize)
     monkeypatch.setattr(
@@ -186,10 +212,15 @@ def test_upstream_matrix_uses_only_ledger_authorized_artifacts(
 
 @pytest.mark.parametrize("matching", [False, True])
 def test_upstream_report_preserves_only_matching_detection_provenance(
-    tmp_path, registry, runs, records, matching
+    tmp_path, registry, runs, records, matching, npm_bundle
 ):
     for record in records.values():
         record.update(trigger="upstream_release", detection_id="a" * 64, run_url=RUN_URL)
+        if record["upstream"]["runtime"]["name"] == "nodejs":
+            bundle = npm_bundle(record["integration"])
+            record["upstream"].update(
+                npm_bundle=bundle, npm_bundle_sha256=npm_bundle_digest(bundle)
+            )
     incoming = write_records(tmp_path / "incoming", records)
     output = tmp_path / "report"
     assert (
@@ -212,6 +243,96 @@ def test_upstream_report_preserves_only_matching_detection_provenance(
         assert "a" * 64 in (output / "site/index.html").read_text()
     else:
         assert history == [] and all(row["state"] == "Not tested" for row in rows.values())
+
+
+@pytest.mark.parametrize("integration", ["nodejs", "mongoose"])
+@pytest.mark.parametrize("outcome", ["passed", "failed", "missing", "wrong-bundle"])
+def test_candidate_evidence_flows_through_reporting_and_readme_publication(
+    tmp_path, registry, records, npm_bundle, integration, outcome
+):
+    baseline = records[integration]
+    baseline["run_url"] = "https://github.com/example/project/actions/runs/41/attempts/1"
+    data = tmp_path / "data"
+    append_result(data / "results", baseline)
+    spec = registry["integrations"][integration]
+    major, minor, _ = spec["default_version"].split(".")
+    version = f"{major}.{int(minor) + 1}.0"
+    bundle = npm_bundle(integration, version)
+    digest = npm_bundle_digest(bundle)
+    candidate = deepcopy(baseline)
+    candidate.update(
+        id="c" * 32, trigger="upstream_release", detection_id="a" * 64, run_url=RUN_URL
+    )
+    candidate["upstream"].update(
+        version=version, actual_version=version, npm_bundle=bundle, npm_bundle_sha256=digest
+    )
+    candidate["upstream"]["dependencies"][0]["version"] = version
+    if outcome == "failed":
+        candidate["tests"][0].update(outcome="failed", message="Synthetic compatibility failure")
+    incoming = write_records(
+        tmp_path / "incoming", {} if outcome == "missing" else {integration: candidate}
+    )
+    report = tmp_path / "report"
+    runs = workflow.select_runs(
+        registry, integration, version, baseline["documentdb"]["version"], upstream=True
+    )
+    success = workflow.collect_report(
+        incoming,
+        report,
+        registry,
+        runs,
+        expected_run_url=RUN_URL,
+        detection_id="a" * 64,
+        expected_npm_bundle_sha256="f" * 64 if outcome == "wrong-bundle" else digest,
+    )
+    assert success is (outcome == "passed")
+    attempt = {
+        "schema_version": 1,
+        "repository": "example/project",
+        "run_id": 42,
+        "run_attempt": 3,
+        "run_url": RUN_URL,
+        "head_sha": "a" * 40,
+        "started_at": (timestamp(candidate["started_at"]) - timedelta(seconds=10)).isoformat(),
+        "conclusion": "success" if success else "failure",
+        "profiles": [],
+        "errors": [],
+    }
+    readme.ingest({"action": "publish", "attempt": attempt}, ROOT, report, data, "example/project")
+    view = readme.snapshot(data, registry, "example/project", datetime.now(timezone.utc))
+    expected = {"passed": "Working", "failed": "Failing"}.get(outcome, "Not tested")
+    row = next(
+        row
+        for row in view["integrations"]
+        if row["integration"] == integration and row["upstream_version"] == version
+    )
+    assert row["state"] == expected
+    assert f"{integration}: {expected}" in readme.badge_svg(view, integration)
+    if outcome in {"passed", "failed"}:
+        saved = json.loads((data / "results" / f"{candidate['id']}.json").read_text())
+        assert saved["upstream"]["npm_bundle"] == bundle
+        assert saved["upstream"]["npm_bundle_sha256"] == digest
+    else:
+        assert not (data / "results" / f"{candidate['id']}.json").exists()
+
+
+@pytest.mark.parametrize("latest_candidate", [False, True])
+def test_incomplete_runs_cannot_reuse_a_different_dependency_tree(
+    registry, records, npm_bundle, latest_candidate
+):
+    baseline = records["nodejs"]
+    candidate = deepcopy(baseline)
+    bundle = npm_bundle()
+    candidate.update(id="b" * 32, trigger="upstream_release", detection_id="a" * 64)
+    candidate["upstream"].update(npm_bundle=bundle, npm_bundle_sha256=npm_bundle_digest(bundle))
+    previous, latest = (baseline, candidate) if latest_candidate else (candidate, baseline)
+    latest["started_at"] = (timestamp(previous["finished_at"]) + timedelta(seconds=1)).isoformat()
+    latest["finished_at"] = (timestamp(latest["started_at"]) + timedelta(seconds=1)).isoformat()
+    latest["tests"] = []
+    latest["execution_error"] = "Candidate preparation unavailable"
+    rows = dashboard_rows([previous, latest], registry, datetime.now(timezone.utc))
+    row = next(row for row in rows if row["integration"] == "nodejs")
+    assert row["state"] == "Stale" and row["latest_attempt_state"] == "Not tested"
 
 
 def test_combined_passes_preserve_envelopes_and_share_dashboard_data(

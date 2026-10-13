@@ -5,17 +5,19 @@
 
 import hashlib
 import json
+import subprocess
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
 
-from compatibility import watcher
-from compatibility.contracts import validate_schema
+from compatibility import npm, watcher
+from compatibility.contracts import npm_bundle_digest, validate_schema
 from compatibility.watcher_state import GitHub, RequestError
 
 pytestmark = pytest.mark.unit
+PYTHON_UPSTREAM = "mongodb/mongo-python-driver"
 
 
 def metadata(version):
@@ -33,13 +35,13 @@ def metadata(version):
     }
 
 
-def release(version, identifier=100):
+def release(version, identifier=100, repository=PYTHON_UPSTREAM):
     return {
         "id": identifier,
         "tag_name": version,
         "draft": False,
         "prerelease": False,
-        "html_url": f"https://github.com/{watcher.UPSTREAM}/releases/tag/{version}",
+        "html_url": f"https://github.com/{repository}/releases/tag/{version}",
         "published_at": "2026-10-01T00:00:00Z",
         "body": "Stable upstream release notes.",
     }
@@ -49,6 +51,7 @@ class FakeAPI(GitHub):
     def __init__(self, releases):
         super().__init__("example/project", "unit-token")
         self.releases = releases
+        self.other_releases = {}
         self.dispatches = []
         self.runs = []
         self.mode = "success"
@@ -56,11 +59,14 @@ class FakeAPI(GitHub):
 
     def request(self, method, path, payload=None):
         assert method == "GET", (method, path)
-        if path == f"/repos/{watcher.UPSTREAM}/releases?per_page=30":
-            return deepcopy(self.releases)
-        prefix = f"/repos/{watcher.UPSTREAM}/releases/"
-        if path.startswith(prefix):
-            return deepcopy(next(r for r in self.releases if str(r["id"]) == path[len(prefix) :]))
+        for repository, releases in {PYTHON_UPSTREAM: self.releases, **self.other_releases}.items():
+            if path == f"/repos/{repository}/releases?per_page=30":
+                return deepcopy(releases)
+            prefix = f"/repos/{repository}/releases/"
+            if path.startswith(prefix):
+                return deepcopy(next(r for r in releases if str(r["id"]) == path[len(prefix) :]))
+        if path.endswith("/releases?per_page=30"):
+            return []
         raise AssertionError(f"Unexpected API request: {method} {path}")
 
     def local(self, method, path, payload=None):
@@ -122,6 +128,9 @@ class MemoryLedger:
         if self.reject_save:
             raise RequestError("Concurrent state writer", 422)
         validate_schema(self.state, "watcher")
+        for entry in self.state["entries"].values():
+            if "npm_bundle" in entry:
+                npm_bundle_digest(entry["npm_bundle"])
         self.api.persisted = deepcopy(self.state)
         self.snapshots.append(deepcopy(self.state))
 
@@ -141,7 +150,7 @@ def context(monkeypatch):
 @pytest.fixture
 def ledger(registry, monkeypatch):
     version = registry["integrations"]["pymongo"]["default_version"]
-    monkeypatch.setattr(watcher, "package_metadata", lambda selected: metadata(selected))
+    monkeypatch.setattr(watcher, "package_metadata", lambda spec, selected: metadata(selected))
     return MemoryLedger(FakeAPI([release(version)]))
 
 
@@ -172,7 +181,7 @@ def test_ineligible_packages_cannot_become_dispatches(
         value["info"]["requires_python"] = ">=3.13"
     else:
         value["urls"][0]["packagetype"] = "sdist"
-    monkeypatch.setattr(watcher, "package_metadata", lambda selected: value)
+    monkeypatch.setattr(watcher, "package_metadata", lambda spec, selected: value)
     assert watcher.discover(ledger, registry, context) == []
     assert not ledger.state["entries"]
     assert "no eligible" in ledger.api.persisted["last_scan"]["observations"][0]["decision"]
@@ -208,13 +217,13 @@ def test_release_policy_precedes_package_access(ledger, registry, context, monke
 
 
 def test_missing_package_is_audited_and_reconsidered(ledger, registry, context, monkeypatch):
-    def missing(version):
+    def missing(spec, version):
         raise RequestError("Not published yet", 404)
 
     monkeypatch.setattr(watcher, "package_metadata", missing)
     assert watcher.discover(ledger, registry, context) == []
     assert "awaiting" in ledger.api.persisted["last_scan"]["observations"][0]["decision"]
-    monkeypatch.setattr(watcher, "package_metadata", metadata)
+    monkeypatch.setattr(watcher, "package_metadata", lambda spec, version: metadata(version))
     assert len(watcher.discover(ledger, registry, context)) == 1
 
 
@@ -360,7 +369,7 @@ def test_changed_policy_or_artifacts_cannot_use_old_authorization(
     else:
         value = metadata(registry["integrations"]["pymongo"]["default_version"])
         value["urls"][0]["digests"]["sha256"] = "e" * 64
-        monkeypatch.setattr(watcher, "package_metadata", lambda version: value)
+        monkeypatch.setattr(watcher, "package_metadata", lambda spec, version: value)
     assert watcher.dispatch(ledger, registry, context)
     assert ledger.api.persisted["entries"][identifier]["status"] == "superseded"
     assert not ledger.api.dispatches
@@ -416,9 +425,9 @@ def test_execution_guard_binds_the_exact_pending_profile(
         with pytest.raises(ValueError):
             watcher.validate_dispatch(registry, [run], identifier, nonce)
     else:
-        assert watcher.validate_dispatch(registry, [run], identifier, nonce) == [
-            entry["artifacts"][0]["sha256"]
-        ]
+        assert watcher.validate_dispatch(registry, [run], identifier, nonce) == {
+            "artifact_sha256s": [entry["artifacts"][0]["sha256"]]
+        }
 
 
 @pytest.mark.parametrize(
@@ -536,3 +545,227 @@ def test_an_incomplete_page_cannot_claim_reconciliation_exhausted_the_feed(
     with pytest.raises(ValueError, match="incomplete pagination"):
         watcher.dispatch(ledger, registry, context)
     assert len(ledger.api.dispatches) == 1
+
+
+def npm_metadata(spec, version, bundle):
+    selected = bundle["lockfile"]["packages"][f"node_modules/{spec['package']}"]
+    return {
+        "name": spec["package"],
+        "version": version,
+        "repository": {"url": f"git+{spec['repository']}.git"},
+        "dist": {"tarball": selected["resolved"], "integrity": selected["integrity"]},
+    }
+
+
+@pytest.fixture
+def npm_ledger(ledger, registry, monkeypatch, npm_bundle, npm_archive):
+    spec = registry["integrations"]["nodejs"]
+    major, minor, _ = spec["default_version"].split(".")
+    version = f"{major}.{int(minor) + 1}.0"
+    repository = watcher.upstream_repository(spec)
+    ledger.api.releases = []
+    ledger.api.other_releases[repository] = [release(version, repository=repository)]
+    monkeypatch.setattr(
+        watcher,
+        "package_metadata",
+        lambda spec, version: npm_metadata(spec, version, npm_bundle("nodejs", version)),
+    )
+    monkeypatch.setattr(
+        watcher,
+        "prepare_npm_candidate",
+        lambda spec, version, published: (
+            npm_bundle("nodejs", version),
+            [
+                {
+                    "filename": f"{spec['package']}-{version}.tgz",
+                    "sha256": hashlib.sha256(npm_archive).hexdigest(),
+                }
+            ],
+        ),
+    )
+    return ledger
+
+
+def test_discovery_gives_each_registered_integration_a_turn(
+    ledger, registry, context, monkeypatch, npm_bundle, npm_archive
+):
+    pymongo = registry["integrations"]["pymongo"]["default_version"]
+    major, minor, patch = pymongo.split(".")
+    ledger.api.releases = [
+        release(f"{major}.{minor}.{int(patch) + offset}", 100 + offset) for offset in (2, 1, 0)
+    ]
+    for name in ("nodejs", "mongoose"):
+        spec = registry["integrations"][name]
+        repository = watcher.upstream_repository(spec)
+        ledger.api.other_releases[repository] = [
+            release(spec["default_version"], repository=repository)
+        ]
+    prepared = []
+
+    def integration(spec):
+        return next(name for name, value in registry["integrations"].items() if value == spec)
+
+    def package(spec, version):
+        if spec["runtime"] == "python":
+            return metadata(version)
+        return npm_metadata(spec, version, npm_bundle(integration(spec), version))
+
+    def prepare(spec, version, published):
+        name = integration(spec)
+        prepared.append(name)
+        return npm_bundle(name, version), [
+            {
+                "filename": f"{spec['package']}-{version}.tgz",
+                "sha256": hashlib.sha256(npm_archive).hexdigest(),
+            }
+        ]
+
+    monkeypatch.setattr(watcher, "package_metadata", package)
+    monkeypatch.setattr(watcher, "prepare_npm_candidate", prepare)
+    selected = watcher.discover(ledger, registry, context)
+    assert {item["integration"] for item in selected} == set(registry["integrations"])
+    assert set(prepared) == {"nodejs", "mongoose"}
+    for item in selected:
+        assert (
+            item["scenario_ids"] == registry["integrations"][item["integration"]]["expected_tests"]
+        )
+    assert watcher.dispatch(ledger, registry, context)
+    assert len(ledger.api.dispatches) == watcher.MAX_DISPATCHES
+    assert {request["inputs"]["integration"] for request in ledger.api.dispatches} == {
+        "pymongo",
+        "nodejs",
+        "mongoose",
+    }
+
+
+def test_npm_rediscovery_and_rate_limit_retries_reuse_the_frozen_tree(
+    npm_ledger, registry, context, monkeypatch
+):
+    identifier, entry = detect(npm_ledger, registry, context)
+    bundle = deepcopy(entry["npm_bundle"])
+    monkeypatch.setattr(
+        watcher,
+        "prepare_npm_candidate",
+        lambda *args: pytest.fail("A retained candidate must not resolve dependencies again"),
+    )
+    npm_ledger.api.mode = "rate-limit"
+    assert not watcher.dispatch(npm_ledger, registry, context)
+    npm_ledger.load()
+    another = replace(context, run_url=context.run_url.removesuffix("/1") + "/2")
+    watcher.discover(npm_ledger, registry, another)
+    npm_ledger.api.mode = "success"
+    assert watcher.dispatch(npm_ledger, registry, another)
+    assert list(npm_ledger.state["entries"]) == [identifier]
+    assert npm_ledger.state["entries"][identifier]["npm_bundle"] == bundle
+    assert len(npm_ledger.api.dispatches) == 2
+
+
+@pytest.mark.parametrize("tampered", [False, True])
+def test_npm_dispatch_transfers_only_the_recorded_bundle(
+    npm_ledger, registry, context, monkeypatch, tampered
+):
+    identifier, entry = detect(npm_ledger, registry, context)
+    assert watcher.dispatch(npm_ledger, registry, context)
+    nonce = entry["attempts"][-1]["id"]
+    if tampered:
+        entry["npm_bundle"]["lockfile"]["requires"] = True
+        npm_ledger.save()
+    monkeypatch.setattr(watcher.Context, "environment", lambda: context)
+    monkeypatch.setattr(watcher, "GitHub", lambda *args: npm_ledger.api)
+    monkeypatch.setattr(watcher, "GitLedger", lambda *args: npm_ledger)
+    monkeypatch.setenv("GITHUB_TOKEN", "unit-token")
+    run = {
+        **{key: entry[key] for key in ("integration", "version", "documentdb_version")},
+        "demonstration": False,
+    }
+    if tampered:
+        with pytest.raises(ValueError, match="durable pending work"):
+            watcher.validate_dispatch(registry, [run], identifier, nonce)
+    else:
+        prepared = watcher.validate_dispatch(registry, [run], identifier, nonce)
+        assert json.loads(prepared["npm_bundle"]) == entry["npm_bundle"]
+        assert prepared["npm_bundle_sha256"] == npm_bundle_digest(entry["npm_bundle"])
+        assert prepared["artifact_sha256s"] == [entry["artifacts"][0]["sha256"]]
+
+
+def test_replaced_npm_root_archive_supersedes_a_pending_candidate(
+    npm_ledger, registry, context, monkeypatch, npm_bundle
+):
+    identifier, entry = detect(npm_ledger, registry, context)
+    spec = registry["integrations"]["nodejs"]
+    metadata_value = npm_metadata(spec, entry["version"], entry["npm_bundle"])
+    metadata_value["dist"]["integrity"] = "sha512-" + "A" * 86 + "=="
+    monkeypatch.setattr(watcher, "package_metadata", lambda *args: metadata_value)
+    assert watcher.dispatch(npm_ledger, registry, context)
+    assert npm_ledger.state["entries"][identifier]["status"] == "superseded"
+    assert not npm_ledger.api.dispatches
+
+
+def test_npm_resolution_is_isolated_and_verifies_the_published_archive(
+    registry, monkeypatch, npm_bundle, npm_archive
+):
+    spec = registry["integrations"]["nodejs"]
+    version = spec["default_version"]
+    bundle = npm_bundle()
+    published = watcher.npm_release(npm_metadata(spec, version, bundle), spec, version)
+    calls = []
+    cleaned = []
+
+    def command(arguments, **kwargs):
+        calls.append(arguments)
+        assert kwargs["timeout"] == 180
+        payload = {key: bundle[key] for key in ("manifest", "lockfile")}
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(watcher, "command", command)
+    monkeypatch.setattr(watcher, "cleanup", lambda *args: cleaned.append(args) or [])
+    monkeypatch.setattr(npm, "registry_bytes", lambda *args: npm_archive)
+    monkeypatch.setenv("GITHUB_TOKEN", "synthetic-token-not-forwarded")
+    prepared, artifacts = watcher.prepare_npm_candidate(spec, version, published)
+    assert prepared == bundle
+    assert artifacts[0]["sha256"] == hashlib.sha256(npm_archive).hexdigest()
+    arguments = calls[0]
+    docker_arguments = arguments[: arguments.index(bundle["resolver_image"])]
+    assert "--read-only" in docker_arguments and "--cap-drop=ALL" in docker_arguments
+    assert docker_arguments[docker_arguments.index("--user") + 1] == "1000:1000"
+    assert not {"--mount", "-v", "--env", "--env-file", "-e"}.intersection(docker_arguments)
+    assert "synthetic-token-not-forwarded" not in arguments
+    assert f"{watcher.LABEL}={cleaned[0][0]}" in arguments
+
+
+@pytest.mark.parametrize("mutation", ["repository", "version", "deprecated"])
+def test_npm_publication_identity_is_not_inferred_from_a_github_tag(registry, npm_bundle, mutation):
+    spec = registry["integrations"]["mongoose"]
+    version = spec["default_version"]
+    metadata_value = npm_metadata(spec, version, npm_bundle("mongoose"))
+    metadata_value[mutation] = {
+        "repository": "https://github.com/unreviewed/package",
+        "version": "1.0.0",
+        "deprecated": "Withdrawn release",
+    }[mutation]
+    if mutation == "deprecated":
+        assert watcher.npm_release(metadata_value, spec, version) is None
+    else:
+        with pytest.raises(ValueError, match="official selected"):
+            watcher.npm_release(metadata_value, spec, version)
+
+
+@pytest.mark.parametrize(
+    ("integration", "prefix"), [("mongoose", "git://"), ("nodejs", "git+ssh://git@")]
+)
+def test_published_git_url_spellings_keep_the_same_official_repository(
+    registry, npm_bundle, integration, prefix
+):
+    spec = registry["integrations"][integration]
+    version = spec["default_version"]
+    metadata_value = npm_metadata(spec, version, npm_bundle(integration))
+    repository = spec["repository"].removeprefix("https://")
+    metadata_value["repository"]["url"] = f"{prefix}{repository}.git"
+    assert watcher.npm_release(metadata_value, spec, version)
+    for invalid in (
+        f"{prefix}{repository}.git?alternate=unreviewed",
+        f"https://github.com.unreviewed.example/{repository.split('/', 1)[1]}.git",
+    ):
+        metadata_value["repository"]["url"] = invalid
+        with pytest.raises(ValueError, match="official selected"):
+            watcher.npm_release(metadata_value, spec, version)

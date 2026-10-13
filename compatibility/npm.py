@@ -17,7 +17,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from compatibility.contracts import ROOT, suite_files
+from compatibility.contracts import (
+    MAX_NPM_BUNDLE_BYTES,
+    ROOT,
+    NoRedirect,
+    npm_bundle_digest,
+    suite_files,
+)
 
 REGISTRY = "https://registry.npmjs.org"
 MAX_PACKAGE_BYTES = 32 * 1024 * 1024
@@ -28,7 +34,7 @@ PACKAGE_PATH = rf"node_modules/{PACKAGE_NAME}(?:/node_modules/{PACKAGE_NAME})*"
 def registry_bytes(url: str, limit: int) -> bytes:
     """Keep metadata and package downloads bounded and on the public registry."""
     validate_registry_url(url)
-    with urllib.request.urlopen(url, timeout=30) as response:
+    with urllib.request.build_opener(NoRedirect()).open(url, timeout=30) as response:
         if response.geturl() != url:
             raise ValueError("Unexpected npm registry redirect")
         content: bytes = response.read(limit + 1)
@@ -38,8 +44,15 @@ def registry_bytes(url: str, limit: int) -> bytes:
 
 
 def validate_registry_url(url: str) -> None:
+    if not isinstance(url, str):
+        raise ValueError("Package URL must name a reviewed npm registry archive")
     parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme != "https" or parsed.netloc != "registry.npmjs.org":
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "registry.npmjs.org"
+        or parsed.query
+        or parsed.fragment
+    ):
         raise ValueError("Package URL is outside the reviewed npm registry")
 
 
@@ -53,29 +66,99 @@ def verify_integrity(content: bytes, integrity: str) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def node_image(spec: dict[str, Any], root: Path = ROOT) -> str:
+    recipe = root / Path(spec["test_file"]).parent / "Dockerfile"
+    images: list[str] = re.findall(
+        r"^FROM (node:24\.[0-9]+\.[0-9]+-[A-Za-z0-9_.-]+@sha256:[a-f0-9]{64})$",
+        recipe.read_text(),
+        re.M,
+    )
+    if len(images) != 1:
+        raise ValueError("npm candidates require one digest-pinned Node 24 base image")
+    return images[0]
+
+
+def validate_lock(
+    manifest: dict[str, Any], lock: dict[str, Any], spec: dict[str, Any], version: str
+) -> None:
+    if (
+        not isinstance(manifest, dict)
+        or not isinstance(lock, dict)
+        or manifest.get("dependencies") != {spec["package"]: version}
+        or lock.get("lockfileVersion") != 3
+        or not isinstance(lock.get("packages"), dict)
+        or not 2 <= len(lock["packages"]) <= 101
+        or not all(isinstance(entry, dict) for entry in lock["packages"].values())
+        or lock["packages"].get("", {}).get("dependencies") != {spec["package"]: version}
+    ):
+        raise ValueError("npm lockfile does not match the selected integration")
+    for path, entry in lock["packages"].items():
+        if path == "":
+            continue
+        if not re.fullmatch(PACKAGE_PATH, path) or entry.get("link"):
+            raise ValueError("npm lockfile contains an unsupported package location")
+        version_value = entry.get("version")
+        if not isinstance(version_value, str) or not re.fullmatch(
+            r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][a-zA-Z0-9.-]+)?", version_value
+        ):
+            raise ValueError("npm lockfile contains an invalid package version")
+        validate_registry_url(entry.get("resolved"))
+        integrity = entry.get("integrity")
+        if (
+            not isinstance(integrity, str)
+            or not integrity.startswith("sha512-")
+            or len(base64.b64decode(integrity.removeprefix("sha512-"), validate=True)) != 64
+        ):
+            raise ValueError("npm archive requires SHA-512 integrity")
+    selected = lock["packages"].get(f"node_modules/{spec['package']}", {})
+    if selected.get("version") != version or selected.get("optional"):
+        raise ValueError("npm lockfile is missing the selected driver version")
+
+
+def validate_npm_bundle(
+    bundle: dict[str, Any], spec: dict[str, Any], version: str, *, root: Path = ROOT
+) -> str:
+    digest = npm_bundle_digest(bundle)
+    if spec["runtime"] != "nodejs" or bundle["resolver_image"] != node_image(spec, root):
+        raise ValueError("npm candidate resolver does not match the reviewed runtime image")
+    validate_lock(bundle["manifest"], bundle["lockfile"], spec, version)
+    return digest
+
+
+def read_npm_bundle(path: Path) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_NPM_BUNDLE_BYTES:
+        raise ValueError("npm candidate input must be a bounded regular JSON file")
+    with path.open("rb") as file:
+        contents = file.read(MAX_NPM_BUNDLE_BYTES + 1)
+    if len(contents) > MAX_NPM_BUNDLE_BYTES:
+        raise ValueError("npm candidate input exceeded its size limit")
+    bundle = json.loads(contents)
+    npm_bundle_digest(bundle)
+    return dict(bundle)
+
+
 def prepare_node_client(
     context: Path,
     spec: dict[str, Any],
     version: str,
     package_cache: Path | None = None,
+    npm_bundle: dict[str, Any] | None = None,
 ) -> str:
-    """Verify every archive against the reviewed lockfile before an offline installation."""
+    """Verify the selected frozen dependency tree before an offline installation."""
     integration = Path(spec["test_file"]).parent.name
     for source in suite_files(integration):
         destination = context / source.relative_to(ROOT)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
     adapter = context / Path(spec["test_file"]).parent
-    manifest = json.loads((adapter / "package.json").read_text())
-    lock = json.loads((adapter / "package-lock.json").read_text())
-    if (
-        manifest["dependencies"] != {spec["package"]: version}
-        or lock.get("lockfileVersion") != 3
-        or not isinstance(lock.get("packages"), dict)
-        or not 2 <= len(lock["packages"]) <= 101
-        or lock["packages"].get("", {}).get("dependencies") != {spec["package"]: version}
-    ):
-        raise ValueError("npm lockfile does not match the selected integration")
+    if npm_bundle is None:
+        manifest = json.loads((adapter / "package.json").read_text())
+        lock = json.loads((adapter / "package-lock.json").read_text())
+        validate_lock(manifest, lock, spec, version)
+    else:
+        validate_npm_bundle(npm_bundle, spec, version)
+        manifest = npm_bundle["manifest"]
+        lock = npm_bundle["lockfile"]
     packages = context / "npm-packages"
     packages.mkdir()
     if package_cache is not None:
@@ -88,12 +171,8 @@ def prepare_node_client(
     for path, entry in lock["packages"].items():
         if path == "" or entry.get("optional"):
             continue
-        if not re.fullmatch(PACKAGE_PATH, path) or entry.get("link"):
-            raise ValueError("npm lockfile contains an unsupported package location")
         name = path.rsplit("node_modules/", 1)[1]
         package_version = entry["version"]
-        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][a-zA-Z0-9.-]+)?", package_version):
-            raise ValueError("npm lockfile contains an invalid package version")
         identity = (name, package_version)
         if identity not in verified:
             archive_url = entry["resolved"]

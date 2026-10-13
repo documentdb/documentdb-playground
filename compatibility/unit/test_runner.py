@@ -13,7 +13,7 @@ import time
 import pytest
 
 from compatibility import runner
-from compatibility.contracts import ROOT, compatibility_state, suite_files
+from compatibility.contracts import ROOT, compatibility_state, npm_bundle_digest, suite_files
 
 pytestmark = pytest.mark.unit
 
@@ -123,6 +123,52 @@ def test_changed_upstream_artifact_fails_before_docker_execution(
     assert "durably recorded" in result["execution_error"]
     assert result["upstream"]["artifact_sha256"] == "c" * 64
     assert json.loads(output.read_text())["detection_id"] == "a" * 64
+
+
+@pytest.mark.parametrize("tampered", [False, True])
+def test_npm_runner_binds_and_retains_candidate_inputs_before_preparation(
+    tmp_path, registry, monkeypatch, npm_bundle, tampered
+):
+    spec = registry["integrations"]["nodejs"]
+    major, minor, _ = spec["default_version"].split(".")
+    version = f"{major}.{int(minor) + 1}.0"
+    bundle = npm_bundle("nodejs", version)
+    digest = npm_bundle_digest(bundle)
+    path = tmp_path / "candidate.json"
+    if tampered:
+        bundle["lockfile"]["requires"] = True
+    path.write_text(json.dumps(bundle))
+    prepared = []
+
+    def unavailable(context, selected, requested, cache, frozen):
+        prepared.append(frozen)
+        raise RuntimeError("Archive unavailable after validating candidate inputs")
+
+    monkeypatch.setattr(runner, "prepare_node_client", unavailable)
+    monkeypatch.setattr(runner, "cleanup", lambda *args: [])
+    monkeypatch.setattr(
+        runner, "command", lambda *args, **kwargs: pytest.fail("Incomplete inputs reached Docker")
+    )
+    result = runner.execute(
+        registry,
+        "nodejs",
+        version,
+        next(iter(registry["documentdb"])),
+        tmp_path / "result.json",
+        trigger="upstream_release",
+        detection_id="a" * 64,
+        expected_artifact_sha256s=["b" * 64],
+        npm_bundle=path,
+        expected_npm_bundle_sha256=digest,
+    )
+    assert compatibility_state(result) == "Not tested"
+    assert result["upstream"]["npm_bundle_sha256"] == digest
+    if tampered:
+        assert not prepared and "recorded inputs" in result["execution_error"]
+        assert "npm_bundle" not in result["upstream"]
+    else:
+        assert prepared == [bundle] and result["upstream"]["npm_bundle"] == bundle
+        assert "Archive unavailable" in result["execution_error"]
 
 
 def test_cleanup_uses_only_the_invocation_label(monkeypatch):

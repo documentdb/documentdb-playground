@@ -36,6 +36,7 @@
           "package": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,39}$"},
           "default_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
           "version_pattern": {"type": "string", "minLength": 1, "maxLength": 100},
+          "watch_version_pattern": {"type": "string", "minLength": 1, "maxLength": 100},
           "profile": {"type": "string", "pattern": "^[a-z0-9_-]{1,80}$"},
           "test_file": {"type": "string", "pattern": "^compatibility/integrations/[a-z0-9_]+/test_[a-z0-9_]+\\.(?:py|cjs)$"},
           "demonstration_file": {"type": "string", "pattern": "^compatibility/integrations/[a-z0-9_]+/test_[a-z0-9_]+\\.(?:py|cjs)$"},
