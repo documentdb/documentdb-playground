@@ -1,0 +1,573 @@
+# Ecosystem compatibility
+
+This registry-driven runner tests ecosystem integration profiles against reviewed
+DocumentDB releases. Execution, artifact verification, and result contracts are
+shared; each integration adapter implements its own scenario suite.
+
+The GitHub Actions workflow runs on demand, daily, and for newly reviewed
+DocumentDB releases. It selects enabled profiles and combines validated results as
+Markdown, HTML, and JSON. A trusted publisher can append results to Git history
+with the persistence helper. An opt-in release watcher requests compatibility
+runs for upstream artifacts that pass its eligibility checks.
+
+## Profiles and reviewed artifacts
+
+[`registry.yaml`](registry.yaml) defines profiles, enablement, default package
+versions, version policies, required scenarios, and reviewed DocumentDB releases.
+Adapter directories under [`integrations/`](integrations/) contain runtime recipes
+and scenario suites. These definitions identify the package, runtime, and database
+combination for a run, not the newest upstream releases. Database and client base
+images are pinned by digest.
+
+Runs target the newest reviewed DocumentDB release by default.
+`--documentdb-version` selects another release listed in the registry.
+
+Version overrides must match the integration's registry policy and have eligible
+artifacts for its runtime. PyMongo versions use three numeric components, such as
+`--version 4.9.0`; equivalent published versions such as `4.9` are matched using
+package-version semantics. A version without an eligible Python 3.12 Linux x64
+wheel is Not tested, not Working.
+
+Before executing scenarios, the controller checks the actual extension and
+PostgreSQL major versions. It verifies the selected wheel's filename and SHA-256
+against non-yanked PyPI metadata. The client records installed package and
+dependency versions and hashes, its runtime version, and its image identity.
+An execution-input digest includes the suite, controller, schemas, and runtime
+recipe, including uncommitted local changes.
+
+For Node.js, every npm archive must match the SHA-512 integrity in the reviewed
+`package-lock.json`. Installation is offline with lifecycle scripts and optional
+packages disabled. The client verifies installed dependency versions and records
+their SHA-256 hashes. Shared JavaScript execution and reporting live in
+`compatibility/client.cjs` and `compatibility/report.cjs`, separate from adapters.
+
+Manual Node.js and Mongoose runs accept only their reviewed locked versions.
+To change a manual baseline, update the manifest in `compatibility/integrations/nodejs` or
+`compatibility/integrations/mongoose`, regenerate that adapter's lockfile using Node 24 and
+`npm install --package-lock-only --ignore-scripts --engine-strict --omit=optional`,
+and update the registry default and version policy. Review dependency changes and
+rerun both the normal and demonstration profiles.
+Mongoose's transitive MongoDB driver is independently locked and recorded as a
+dependency, never substituted for the Mongoose package version.
+Authorized upstream runs instead use a frozen candidate manifest and lockfile
+recorded by the watcher. They do not modify the checked-in baselines or broaden
+manual version overrides.
+
+## Coverage
+
+The PyMongo and native Node.js profiles exercise synchronous Python and
+asynchronous JavaScript driver APIs, respectively. Each profile's required
+scenarios are declared in the registry's `expected_tests` list and cover the
+following behavior:
+
+| Area | Behavior |
+| --- | --- |
+| Connection | Authenticated administrative ping over TLS |
+| Inserts and reads | `insert_one`, `insert_many`, `find_one`, filters, projection, sorting, limits, and exact readback |
+| Cursor and counts | Observed `getMore` with bounded batches and exact document counts |
+| Updates and deletes | `update_one`, `find_one_and_update`, `delete_one`, `delete_many`, result objects, and persisted effects |
+| Aggregation and indexes | Aggregation results, index creation/listing/removal, and duplicate-key rejection |
+| BSON | ObjectId, integers, Decimal128, dates, binary values, arrays, booleans, and nested documents |
+
+Each scenario has a fresh disposable database. Required cases cannot be silently
+skipped or exempted. A result applies only to its exact version pair, runtime,
+execution inputs, and declared scenarios. It does not establish compatibility
+for Python async APIs, transactions, vector search, or other unlisted features.
+
+The Node.js profile uses the corresponding camel-case APIs (`insertOne`, `findOne`,
+`findOneAndUpdate`, and others), promises, and `for await` cursor iteration. It
+checks native driver return shapes and BSON representations rather than replaying
+raw commands through another client. Python async APIs, optional native Node.js
+modules, transactions, vector search, and unlisted APIs remain out of scope.
+
+### Mongoose model coverage
+
+The Mongoose profile's `expected_tests` list names its required model and document
+scenarios. They exercise ODM behavior rather than bypassing it through raw driver
+collections:
+
+| Area | Behavior checked |
+| --- | --- |
+| Connection | Authenticated administrative ping through the model connection |
+| Creation | `Model.create`, `insertMany`, identifiers, casting, defaults, timestamps, hydration, and exact readback |
+| Reads and cursors | `findById` with string-ID casting, missing documents, filters, projection, sorting, counts, and observed `getMore` |
+| Writes | Document `save` and dirty tracking, `updateOne`, `findOneAndUpdate`, deletes, result objects, and persisted effects |
+| Aggregation and indexes | Exact aggregation output, schema-driven indexes, index listing, and duplicate-key rejection |
+| Validation and BSON | Required/minimum validators on inserts and updates, ObjectId, BigInt, Decimal128, dates, buffers, arrays, booleans, and nested documents |
+
+Each scenario uses a fresh connection and database with automatic index and
+collection creation and command buffering disabled. Every declared scenario must
+pass; there are no known-failure exemptions. Transactions, population,
+plugins, middleware, vector search, and unlisted model APIs are outside this profile.
+
+## Run locally
+
+Use a Python 3.12 virtual environment or a prepared Python 3.12 tooling container,
+with access to a Linux Docker daemon capable of running Linux x64 images. Run
+these commands from the repository root and install trusted controller dependencies
+in that environment, not in the disposable integration client:
+
+```bash
+python -m pip install -r compatibility/requirements.txt
+python -m compatibility.runner --integration pymongo \
+  --output compatibility/.test-results/pymongo-001/result.json
+python -m compatibility.runner --integration pymongo --version 4.9.0 \
+  --output compatibility/.test-results/pymongo-4.9.0/result.json
+python -m compatibility.runner --integration nodejs \
+  --output compatibility/.test-results/nodejs-001/result.json
+python -m compatibility.runner --integration mongoose \
+  --output compatibility/.test-results/mongoose-001/result.json
+```
+
+Each invocation requires a fresh output path and creates fresh credentials,
+containers, an internal Docker network, and disposable databases. Only the
+controller has Docker access. The integration client receives no checkout mount,
+Docker socket, publication credential, or external network access.
+
+The runner builds the client without build-time network access after downloading
+verified wheels. `--wheelhouse /path/to/wheels` reuses downloaded wheels, but PyPI
+metadata verification still requires network access. Do not disable TLS
+verification for package downloads.
+
+For Node.js profiles, `--package-cache /path/to/cache` reuses archives named
+`<sha256-of-the-lockfile-integrity-string>.tgz`. Every cached archive is verified
+against the reviewed lockfile; a complete cache needs no registry access.
+`--wheelhouse` is Python-only and `--package-cache` is Node-only. Node.js is needed
+only inside the pinned client container, not on the controller host.
+
+The output includes `result.json`, a sanitized `result.log`, and `result.xml`
+when tests execute. Setup failures still produce a validated JSON envelope and
+diagnostics. Cleanup targets only the invocation's labeled Docker resources.
+The runner refuses to overwrite existing results or diagnostic files.
+
+To verify the nonpassing path:
+
+```bash
+python -m compatibility.runner --integration pymongo --demonstration \
+  --output compatibility/.test-results/pymongo-demo-001/result.json
+python -m compatibility.runner --integration nodejs --demonstration \
+  --output compatibility/.test-results/nodejs-demo-001/result.json
+python -m compatibility.runner --integration mongoose --demonstration \
+  --output compatibility/.test-results/mongoose-demo-001/result.json
+```
+
+This runs the normal scenarios plus one labeled intentional assertion failure
+and must exit nonzero. Demonstration evidence cannot replace a compatibility
+verdict. Use only synthetic data; do not supply production credentials.
+
+## Interpret results
+
+Working requires verified identities and every required scenario to pass.
+A conclusive assertion or operation failure produces Failing. Missing, skipped,
+incomplete, or infrastructure-failed execution cannot become Working and is
+reported as Not tested unless a conclusive compatibility failure is present.
+
+Inspect the scenario diagnostics and declared coverage before reporting a
+compatibility problem. Distinguish an operation mismatch from a package-download,
+readiness, or cleanup failure. Include a minimal synthetic reproduction, the
+integration and database versions, the profile, and sanitized result/log details.
+Never share credentials or customer data.
+
+Runs emit runtime-neutral schema version 2. Schema-version-1 Python records remain
+readable without rewriting their immutable provenance.
+
+## Results and dashboard preview
+
+Append locally produced normal and demonstration records to an immutable store:
+
+```bash
+python -m compatibility.publish \
+  --result compatibility/.test-results/pymongo-001/result.json \
+  --store compatibility/.test-results/history \
+  --site compatibility/.test-results/site --preview
+python -m compatibility.publish \
+  --result compatibility/.test-results/pymongo-demo-001/result.json \
+  --store compatibility/.test-results/history \
+  --site compatibility/.test-results/site --preview
+```
+
+Open `compatibility/.test-results/site/index.html`. The same validated history
+produces HTML, `current.json`, and `history.json`. Conflicting run IDs are rejected;
+identical replays are idempotent. Demonstrations remain separate from normal
+compatibility evidence. Local runs have no fabricated pipeline URL.
+
+| State | Meaning |
+| --- | --- |
+| Working | All required scenarios passed with verified artifacts |
+| Failing | A conclusive assertion or non-timeout operation/protocol failure |
+| Not tested | Missing or skipped coverage, timeouts, setup errors, or other incomplete execution |
+| Stale | The last conclusive result is older than the profile's freshness policy or no longer matches its execution inputs/artifacts |
+
+If a newer attempt cannot execute, retain the previous conclusive result while
+exposing the new attempt's failure separately. Keep version pairs and profiles
+distinct. Browser-side freshness also ages previously rendered results.
+
+The `--preview` option labels review prototypes and hides public issue links.
+Without it, the renderer provides prefilled links to this repository's
+[compatibility issue form](../.github/ISSUE_TEMPLATE/compatibility-report.yml).
+Use `--issue-repository` to select a different reporting destination with the
+same form field IDs. A report should include the actual version pair,
+runtime/profile, relevant run, and a minimal synthetic reproduction, never
+credentials or customer data.
+
+This renderer does not push Git history, deploy a site, create issues, or change
+repository settings. Public hosting and durable publication require a separately
+approved destination, publisher, operational owner, and reporting route.
+
+## GitHub Actions workflow
+
+Manual dispatch requires the workflow on the repository's default branch.
+Select **Ecosystem compatibility** in the Actions tab, then choose the branch
+and, optionally, a reviewed database release. A blank release uses the newest
+reviewed release in the registry, and `all` selects every reviewed release. The
+integration defaults to `all`: a planning job expands every enabled registry entry
+using its own reviewed default version. Select one integration for a focused run
+or version override. A version override with `all`, a disabled integration, a
+version outside its registry policy, or an unknown database release is rejected
+before test jobs start. Keep the failure demonstration disabled for real results.
+
+The workflow also runs daily on the default branch. Scheduled runs test every
+enabled integration at its default version against every reviewed DocumentDB
+release.
+
+Each push to `main` that changes `registry.yaml` starts **Compatibility DocumentDB
+releases**. It compares the registry with the version before the push and
+dispatches this workflow once for each added or re-pinned release, with every
+enabled integration at its default version and the `documentdb_release` trigger.
+If the earlier registry is unavailable, every reviewed release is dispatched. The
+`trigger` input defaults to `manual`; a `documentdb_release` run requires one
+reviewed release and cannot narrow integrations, override versions, or enable the
+failure demonstration.
+
+Each matrix job runs its complete scenario suite against its own disposable
+database. Matrix fail-fast is disabled. JSON and available JUnit/logs are retained
+in `compatibility-results-<integration>-<documentdb-version>-<attempt>` artifacts
+even when the job fails. Results record the trigger (`manual`, `scheduled`,
+`documentdb_release`, or the watcher's `upstream_release`) and exact
+workflow-attempt URL.
+
+After the matrix finishes, reporting validates each selected result's identity,
+trigger, coverage, artifacts, suite digest, and workflow-attempt URL. The summary
+includes every selected integration and database release. Missing or rejected
+results are **Not tested**, with a diagnostic, not fabricated envelopes or an
+earlier attempt's pass. Compatibility failures remain **Failing**, and failed or
+incomplete reports exit nonzero without suppressing matrix failures.
+
+The `compatibility-report-<attempt>` artifact contains `summary.md`, machine-readable
+`summary.json`, accepted envelopes in `results/`, and a combined preview in `site/`.
+Only selected profiles and versions appear, including explicit overrides and
+labeled demonstrations. All artifacts have 30-day retention.
+
+Use **Re-run all jobs** for a complete matrix rerun. Reporting deliberately
+collects only the current attempt's artifacts, so rerunning only failed jobs can
+leave other integrations or releases without current-attempt evidence. Re-running
+an older workflow retains its original commit; dispatch a fresh run to test new
+code.
+
+All compatibility jobs have read-only repository permissions. The release
+dispatcher additionally receives `actions: write` only to start this workflow.
+Neither workflow publishes Git history, deploys a site, creates issues, or changes
+repository settings.
+Normal default-branch completions notify the separate README dashboard publisher.
+That publisher retains its own write permission; integration execution and report
+generation never receive publication credentials.
+
+To inspect selection, combine locally produced records, or list the releases a
+registry change would dispatch:
+
+```bash
+python -m compatibility.workflow matrix --integration all
+python -m compatibility.workflow matrix --documentdb-version all --trigger scheduled
+python -m compatibility.workflow report --integration all \
+  --input compatibility/.test-results/incoming \
+  --output compatibility/.test-results/combined-001
+python -m compatibility.workflow changed-releases --previous /path/to/previous-registry.yaml
+```
+
+Place each record under `incoming/<integration>/<documentdb-version>/result.json`.
+Use the same integration, version, database, demonstration, and trigger selection
+as the producing runs, and a fresh output directory. `--expected-run-url` binds a
+combined report to one workflow attempt; omit it for local results. `--summary`
+appends the Markdown report to a GitHub step-summary file.
+The Markdown summary labels each result's trigger. Upstream-triggered reports
+select `upstream_release` with `--detection-id` and `--dispatch-id` instead of
+`--trigger`, and carry the detection ID through JSON and the dashboard.
+
+## Opt-in upstream release watcher
+
+The reviewed source is
+[compatibility-watcher.md](../.github/workflows/compatibility-watcher.md).
+Its generated `.lock.yml` runs GitHub Agentic Workflows with the Copilot engine.
+It is disabled unless both repository or organization variables are configured:
+
+| Variable | Required value |
+| --- | --- |
+| `COMPATIBILITY_WATCHER_ENABLED` | The literal string `true` |
+| `COMPATIBILITY_WATCHER_MODEL` | An organization-approved Copilot model ID |
+
+Before enabling it, maintainers must approve the model and organization Copilot
+authentication, including the `copilot-requests: write` permission, Actions
+budgets, and the dedicated state branch. No PAT or new secret is required by
+the authored workflow. It does not configure subscriptions, credentials,
+variables, branch rules, or hosting.
+
+The watcher and compatibility workflows must exist on the default branch. The watcher
+accepts only scheduled or manual execution on that branch. It runs daily at
+08:23 UTC and can also be started with **Run workflow**. Its invocations are
+serialized. Disable the enablement variable to stop future work, and explicitly
+cancel an in-flight run when immediate suspension is needed.
+
+Release discovery uses each enabled registry entry with a `watch_version_pattern`.
+That optional field opts a profile into discovery and defines its automatic version
+range independently of the manual `version_pattern`. The checked-in policies admit
+stable releases at least as new as each baseline within its current major version.
+Prereleases and new majors are not selected automatically.
+
+The watcher reads at most 30 releases from each registered upstream GitHub
+repository, for at most ten watched integrations. It examines those feeds in
+round-robin order rather than draining one integration's release backlog first.
+GitHub release identities must match the registered repository.
+Package names, versions, and artifacts are checked against the corresponding
+official package registry. Unpublished metadata is recorded and reconsidered
+on later scans.
+
+Python discovery requires eligible non-yanked wheels from PyPI.
+The wheel tags match the runner's Python 3.12 Linux x64 download policy.
+`Requires-Python` must admit **3.12.0**, a conservative floor: a release requiring
+a newer 3.12 patch is not automatically selected even if a particular image
+could run it.
+
+For npm, the package's registry repository must match the registered upstream,
+and deprecated releases are excluded. A disposable container using the profile's
+digest-pinned Node image resolves the exact candidate with lifecycle scripts,
+optional installation, auditing, and funding requests disabled. Engine requirements
+are enforced. The resolver has no credentials, checkout mount, or Docker socket;
+only its temporary filesystem is writable. Resolution failures stop discovery
+with an explicit ledger error, not an invented compatibility verdict.
+
+The resulting manifest, lockfile, and resolver image form a bundle capped at
+64 KiB and 100 locked dependencies. Every non-optional archive must pass the
+existing registry-origin and SHA-512 verification before the candidate is recorded.
+The locked root archive must also match the independently fetched release metadata.
+The complete bundle is stored in the Git-backed ledger, and its SHA-256 contributes
+to the detection identity. Rediscovery and retries reuse that bundle instead of
+resolving a newer transitive dependency tree. Changed execution inputs or published
+root artifacts require a new detection.
+
+At most three new version pairs are recorded per invocation. Each detection
+includes the upstream artifacts and hashes, DocumentDB image and version,
+profile, execution-input digest, source revision, release evidence, and discovery
+run. The key covers the execution identity, not just the latest version string.
+
+The read-only AI agent receives at most three bounded public release excerpts
+and known scenario IDs. It provides an advisory summary and optional scenario
+references, not commands, eligibility decisions, or compatibility verdicts.
+It cannot reduce coverage. Its assessment retains the model, prompt hash, and
+run URL. The release-analysis agent has a four-turn, ten-minute inference limit;
+framework validation has separate bounded jobs. These limits are not a monetary
+budget.
+
+The trusted dispatcher runs the complete affected profile even if AI analysis
+fails or omits a release. Missing analysis is explicitly marked `unavailable`,
+with a warning; failed AI jobs are not turned green. Before dispatch, the code
+revalidates the reviewed execution inputs and official release artifacts.
+An unexpected downloaded artifact is rejected before Docker build or execution.
+Only the planning step reads watcher state. It passes the validated bundle and
+its hash as bounded matrix data, not executable instructions. The runner checks
+that identity before downloading archives or building a client and installs the
+frozen dependency tree offline. Results retain the bundle and hash alongside the
+actual installed dependencies; report collection checks the planned hash.
+No GitHub or inference token is passed to the isolated test client.
+
+Normal default-branch upstream runs use the same combined reports and README
+publisher as manual and scheduled runs. Verified candidate results, including compatibility
+failures and incomplete attempts, can therefore update the existing badges
+without changing the default package versions. Merely discovering a release,
+resolving its dependencies, or receiving an AI assessment cannot make a badge green.
+
+### State, retries, and recovery
+
+The orphan `compatibility-watcher-state` branch contains a single `ledger.json`,
+including the frozen npm inputs needed to reproduce its detections.
+Non-force Git reference updates reject concurrent writers. Each reservation is
+persisted before contacting the dispatch API, and the resulting workflow receipt
+is saved afterward. Git history retains earlier scans and state transitions.
+Allow the workflow's GitHub token to create and update this data branch; a denied
+write stops the operation rather than falling back to ephemeral deduplication.
+
+There are at most three automatic dispatch requests per invocation and three
+automatic attempts per detection. Only definite rate-limit rejections are
+automatically retried on later invocations. Unknown outcomes are reconciled by
+receipt or the exact detection/dispatch nonce in the workflow title, never
+blindly resent. The bounded lookup covers up to seven days and 1,000 runs.
+Incomplete lookups and duplicate nonces require attention.
+
+| Ledger status | Meaning |
+| --- | --- |
+| `pending` | Durable eligible work waiting for dispatch, possibly after a rate limit |
+| `dispatching` | A reservation exists but its API outcome is not yet established |
+| `dispatched` | A validated workflow receipt is recorded |
+| `completed` | The associated workflow is terminal, not a compatibility pass |
+| `blocked` | Automatic processing stopped and requires maintainer investigation |
+| `superseded` | The reviewed execution inputs, policy, or upstream artifacts changed |
+
+For a known workflow receipt, use **Re-run all jobs** to repeat the full selected
+profile. If dispatch was rejected or its outcome is unknown, first inspect the
+recorded watcher run and search the compatibility workflow for the exact nonce.
+If no run was accepted, manually dispatch **Ecosystem compatibility** on the
+default branch with the recorded integration/version/database, `detection_id`,
+and last attempt's `dispatch_id`. Keep demonstration disabled and do not create
+a new nonce. The consumer validates these inputs against the ledger, and the next
+watcher invocation can associate the manual run. After execution inputs change,
+use a new discovery rather than overriding the identity checks. An ordinary
+manual run with both IDs blank remains available independently of the watcher.
+
+Inspect compatibility artifacts and use the reporting guidance above for
+conclusive scenario failures. `completed`, successful dispatch, or AI analysis
+does not establish Working. Watcher failures remain visible as failed Actions
+jobs and ledger errors; automatic issue creation is disabled in the workflow.
+
+The ledger is bounded to 1,000 entries and 2 MiB. Exhaustion stops new writes
+and requires a reviewed retention strategy preserving the audit and deduplication
+identities. Do not delete the state branch or old detection IDs to retry work.
+Watcher state is not the compatibility-result history or an automatically
+published dashboard.
+
+Automatic dispatch uses the registry's reviewed DocumentDB releases; release
+discovery does not select new database images. Compatibility results are retained
+as workflow artifacts, not deployed to a public site.
+
+Adding a package ecosystem to discovery requires a metadata adapter and a
+reviewed version-selection policy compatible with the runner's artifact checks.
+Python and npm profiles share the existing metadata and preparation paths. Adding
+an adapter for either runtime requires its registered official package/repository,
+complete scenario contract, and an explicit `watch_version_pattern`; the reviewed
+manual manifest and lockfile remain the default for npm profiles.
+
+### Regenerate the watcher
+
+Use the pinned `gh-aw` **v0.89.21** compiler and release action mode. The
+infrastructure workflow downloads its Linux x64 binary, verifies its SHA-256,
+validates the workflow, and rejects generated-file drift. Make authored changes
+in the Markdown file, then compile with that same binary:
+
+```bash
+gh-aw compile compatibility-watcher \
+  --action-mode release --strict --validate --no-check-update
+```
+
+Commit the Markdown, generated lock workflow, and `.github/aw/actions-lock.json`
+together. Do not hand-edit the generated YAML. The pinned compiler's schema
+validation understands the Copilot permission and queued-concurrency fields;
+older standalone Actions linters may not. Local unit tests simulate inference,
+GitHub receipts, interruptions, and real Git conflicts without production
+dispatches or live inference.
+
+## Durable Git history
+
+The generic history helper is available for an explicitly configured trusted
+publisher, not for integration clients:
+
+```bash
+bash compatibility/persist.sh /path/to/result.json "$EXPECTED_RUN_URL"
+```
+
+Run it from the trusted source checkout with write access to the intended
+`origin`. Set `EXPECTED_RUN_URL` to the originating test attempt, not a later
+publication retry. The helper verifies that URL, declared coverage, database
+artifact, and execution-input digest, then appends `results/<id>.json` to
+`compatibility-data`.
+
+The helper uses non-force pushes with bounded conflict retries and initializes
+an orphan branch containing only result data. Identical replays are idempotent;
+conflicting run IDs fail rather than overwrite history. Concurrent writers'
+records survive retry, and temporary worktrees are removed. Retain the data
+branch independently of artifact expiration.
+
+Keep write credentials separate from integration execution. A publisher must
+retain failed attempts and serialize deployment only after results are durably
+stored. Render complete history with `compatibility.publish`, using `--preview`
+for review prototypes. Deployment retries must not delete or rewrite history.
+Cancellation before persistence is not a compatibility verdict.
+
+Invoke this helper explicitly from the trusted publisher; the compatibility
+workflow does not call it. It does not configure hosting, GitHub Pages,
+credentials, repository permissions, or a release-watcher ledger.
+
+## README dashboard
+
+The repository README embeds compact integration badges from the `compatibility-data`
+branch. Each badge links to that integration's accessible results table, including
+the source workflow runs and their detailed report artifacts. The publisher generates
+`site/badges/<integration>.svg`, per-integration sections in `site/README.md`, and the
+full status card in `site/status.svg` from the shared status snapshot.
+
+Badges summarize the integration's published version and profile rows, using
+Failing before Not tested, Stale, and Working. A missing latest result prevents a
+green badge even when an earlier pass remains available in the details. A workflow
+that fails before its profile selection is known also prevents a green badge.
+Freshness and intentional-failure exclusion follow the same rules as the details.
+
+The dashboard shows client and DocumentDB versions, the last conclusive evidence,
+the latest attempt's outcome and execution timestamp, and verified scenario
+counts. An incomplete attempt cannot acquire an earlier attempt's success.
+Workflow failures without usable profile artifacts remain visible separately
+from older conclusive evidence. Synthetic demonstrations are excluded.
+
+`Compatibility README dashboard` consumes completed dispatched or scheduled
+`Ecosystem compatibility` runs from the same repository's default branch. Test
+execution remains read-only; only the trusted publisher can write the data branch.
+The publisher checks the source run, workflow path, repository, branch, artifact
+attempt, and reviewed execution inputs. It reads source files to verify their
+digests but never executes source-run code or downloaded artifact content.
+
+Result JSON files remain immutable. Workflow-attempt identity and execution time
+cannot be rewritten, while a later publication can recover previously unavailable
+artifacts for that same attempt. Non-force updates preserve concurrent data
+writers. The workflow refreshes the snapshot when default-branch inputs change
+and hourly for freshness; it commits only when the published content changes.
+It does not activate AI, create issues, or deploy a public website.
+
+For manual recovery, dispatch `Compatibility README dashboard` on the default
+branch with a completed compatibility `run_id`. Leave that input empty to render
+stored evidence without launching tests. The source report artifact must still
+be available. Before a completed run is published, the initialized dashboard
+shows Not tested.
+
+GitHub may cache embedded images. The accessible results and `site/status.json`
+on the data branch expose the same snapshot. Execution timestamps always refer
+to actual runs, never to rendering or refresh time.
+
+## Extend and maintain
+
+When adding an integration, include its badge in the root README. Use
+`/../compatibility-data/site/badges/<integration>.svg` for the image and
+`/../compatibility-data/site/README.md#<integration>` for the details link.
+
+Add a reviewed adapter directory, pinned image and package requirements, normal
+and deliberate-failure suites, and a registry entry naming every required
+scenario. Keep package preparation, runtime validation, and provenance support
+with any new runtime. Enable an integration only when its real adapter exists.
+A registry entry alone does not implement runtime support.
+Expose it in the workflow's integration selector as well as the registry.
+
+Run infrastructure checks in a prepared Python 3.12 tooling container:
+
+```bash
+python -m pip install -r compatibility/requirements-dev.txt
+python -m black --check --config compatibility/pyproject.toml compatibility
+python -m isort --check-only --settings-path compatibility/pyproject.toml compatibility
+python -m flake8 --max-line-length=100 --extend-ignore=E203 compatibility
+python -m mypy --config-file compatibility/pyproject.toml compatibility
+python -m pytest -c compatibility/pyproject.toml compatibility/unit
+shellcheck compatibility/persist.sh
+node --test compatibility/unit/test_freshness.cjs compatibility/unit/test_nodejs.cjs
+```
+
+Run the JavaScript reporting and freshness checks with Node 24 in a tooling
+container. They do not require a database or installed integration packages.
+
+Also exercise normal and deliberate-failure runs against the selected released
+database image. Assertions and fixtures should derive selected configuration
+from the registry rather than duplicate version pins. No unchanged database or
+gateway build is required for compatibility-only changes.
