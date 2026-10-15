@@ -17,14 +17,23 @@ on:
         type: string
         required: false
       documentdb_version:
-        description: Reviewed DocumentDB release from compatibility/registry.yaml
+        description: Reviewed DocumentDB release from compatibility/registry.yaml, or all (blank uses the newest)
         type: string
-        default: "0.117.0"
-        required: true
+        required: false
       demonstration:
         description: Add a separately labeled, intentionally failing assertion
         type: boolean
         default: false
+      trigger:
+        description: Execution trigger recorded with the results
+        type: choice
+        options:
+          - manual
+          - documentdb_release
+        default: manual
+        required: true
+  schedule:
+    - cron: "41 5 * * *"
 
 permissions:
   contents: read
@@ -50,18 +59,20 @@ jobs:
         env:
           INTEGRATION: ${{ inputs.integration }}
           VERSION: ${{ inputs.version }}
-          DOCUMENTDB_VERSION: ${{ inputs.documentdb_version }}
+          DOCUMENTDB_VERSION: ${{ github.event_name == 'schedule' && 'all' || inputs.documentdb_version }}
           DEMONSTRATION: ${{ inputs.demonstration }}
+          TRIGGER: ${{ github.event_name == 'schedule' && 'scheduled' || inputs.trigger }}
         run: |
           args=()
           if [ -n "$INTEGRATION" ]; then args+=(--integration "$INTEGRATION"); fi
           if [ -n "$DOCUMENTDB_VERSION" ]; then args+=(--documentdb-version "$DOCUMENTDB_VERSION"); fi
           if [ -n "$VERSION" ]; then args+=(--version "$VERSION"); fi
           if [ "$DEMONSTRATION" = "true" ]; then args+=(--demonstration); fi
+          if [ -n "$TRIGGER" ]; then args+=(--trigger "$TRIGGER"); fi
           matrix=$(python -m compatibility.workflow matrix "${args[@]}")
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
   test:
-    name: ${{ matrix.integration }} ${{ matrix.version }}
+    name: ${{ matrix.integration }} ${{ matrix.version }} on DocumentDB ${{ matrix.documentdb_version }}
     needs: plan
     strategy:
       fail-fast: false
@@ -84,13 +95,15 @@ jobs:
           VERSION: ${{ matrix.version }}
           DOCUMENTDB_VERSION: ${{ matrix.documentdb_version }}
           DEMONSTRATION: ${{ matrix.demonstration }}
+          TRIGGER: ${{ matrix.trigger }}
         run: |
           args=(
             --integration "$INTEGRATION"
             --version "$VERSION"
             --documentdb-version "$DOCUMENTDB_VERSION"
-            --output "results/$INTEGRATION/result.json"
+            --output "results/$INTEGRATION/$DOCUMENTDB_VERSION/result.json"
             --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+            --trigger "$TRIGGER"
           )
           if [ "$DEMONSTRATION" = "true" ]; then args+=(--demonstration); fi
           python -m compatibility.runner "${args[@]}"
@@ -98,7 +111,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: compatibility-results-${{ matrix.integration }}-${{ github.run_attempt }}
+          name: compatibility-results-${{ matrix.integration }}-${{ matrix.documentdb_version }}-${{ github.run_attempt }}
           path: results/
           if-no-files-found: error
           retention-days: 30
@@ -128,8 +141,9 @@ jobs:
         env:
           INTEGRATION: ${{ inputs.integration }}
           VERSION: ${{ inputs.version }}
-          DOCUMENTDB_VERSION: ${{ inputs.documentdb_version }}
+          DOCUMENTDB_VERSION: ${{ github.event_name == 'schedule' && 'all' || inputs.documentdb_version }}
           DEMONSTRATION: ${{ inputs.demonstration }}
+          TRIGGER: ${{ github.event_name == 'schedule' && 'scheduled' || inputs.trigger }}
         run: |
           args=(
             --input incoming
@@ -141,6 +155,7 @@ jobs:
           if [ -n "$DOCUMENTDB_VERSION" ]; then args+=(--documentdb-version "$DOCUMENTDB_VERSION"); fi
           if [ -n "$VERSION" ]; then args+=(--version "$VERSION"); fi
           if [ "$DEMONSTRATION" = "true" ]; then args+=(--demonstration); fi
+          if [ -n "$TRIGGER" ]; then args+=(--trigger "$TRIGGER"); fi
           python -m compatibility.workflow report "${args[@]}"
       - name: Retain the combined summary and dashboard preview
         if: always()
