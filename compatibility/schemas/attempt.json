@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "repository", "run_id", "run_attempt", "run_url",
+    "head_sha", "started_at", "conclusion", "profiles", "errors"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "run_id": {"type": "integer", "minimum": 1},
+    "run_attempt": {"type": "integer", "minimum": 1},
+    "run_url": {
+      "type": "string",
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*/attempts/[1-9][0-9]*$"
+    },
+    "head_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "conclusion": {
+      "enum": ["success", "failure", "cancelled", "timed_out", "action_required", "neutral",
+        "skipped", "stale", "startup_failure"]
+    },
+    "profiles": {
+      "type": "array",
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["integration", "documentdb_version", "upstream_version", "profile"],
+        "properties": {
+          "integration": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$"},
+          "documentdb_version": {"type": "string", "maxLength": 64},
+          "upstream_version": {"type": "string", "maxLength": 64},
+          "profile": {"type": "string", "maxLength": 128}
+        }
+      }
+    },
+    "errors": {
+      "type": "array", "maxItems": 200,
+      "items": {"type": "string", "maxLength": 1000}
+    }
+  }
+}
