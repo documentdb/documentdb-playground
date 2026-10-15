@@ -53,6 +53,11 @@ def read_registry(
     return dict(registry)
 
 
+def default_documentdb_version(registry: dict[str, Any]) -> str:
+    """Return the newest reviewed DocumentDB release using version ordering."""
+    return str(max(registry["documentdb"], key=Version))
+
+
 def timestamp(value: str) -> datetime:
     """Parse an explicitly zoned timestamp into UTC."""
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))

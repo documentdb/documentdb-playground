@@ -13,6 +13,9 @@ and scenario suites. These definitions identify the package, runtime, and databa
 combination for a run, not the newest upstream releases. Database and client base
 images are pinned by digest.
 
+Runs target the newest reviewed DocumentDB release by default.
+`--documentdb-version` selects another release listed in the registry.
+
 Version overrides must match the integration's registry policy and have eligible
 artifacts for its runtime. PyMongo versions use three numeric components, such as
 `--version 4.9.0`; equivalent published versions such as `4.9` are matched using
@@ -122,12 +125,12 @@ counts. An incomplete attempt cannot acquire an earlier attempt's success.
 Workflow failures without usable profile artifacts remain visible separately
 from older conclusive evidence. Synthetic demonstrations are excluded.
 
-`Compatibility README dashboard` consumes completed `Ecosystem compatibility`
-runs from the same repository's default branch. Test execution remains read-only;
-only the trusted publisher can write the data branch. The publisher checks the
-source run, workflow path, repository, branch, artifact attempt, and reviewed
-execution inputs. It reads source files to verify their digests but never executes
-source-run code or downloaded artifact content.
+`Compatibility README dashboard` consumes completed dispatched or scheduled
+`Ecosystem compatibility` runs from the same repository's default branch. Test
+execution remains read-only; only the trusted publisher can write the data branch.
+The publisher checks the source run, workflow path, repository, branch, artifact
+attempt, and reviewed execution inputs. It reads source files to verify their
+digests but never executes source-run code or downloaded artifact content.
 
 Result JSON files remain immutable. Workflow-attempt identity and execution time
 cannot be rewritten, while a later publication can recover previously unavailable
