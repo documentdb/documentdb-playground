@@ -9,6 +9,8 @@ from copy import deepcopy
 from datetime import timedelta
 
 import pytest
+import yaml
+from packaging.version import Version
 
 from compatibility import workflow
 from compatibility.contracts import RUNTIME_PREFIXES, expected_tests, suite_digest, timestamp
@@ -51,9 +53,9 @@ def records(registry, record, runs):
     return results
 
 
-def write_records(path, records):
+def write_records(path, records, release=None):
     for integration, result in records.items():
-        directory = path / integration
+        directory = path / integration / (release or result["documentdb"]["version"])
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "result.json").write_text(json.dumps(result))
     return path
@@ -89,8 +91,90 @@ def test_single_integration_default_and_override(registry, selection, other_vers
         registry, selection["integration"], version, selection["documentdb_version"]
     )
     assert runs == [
-        {**selection, "version": version or selection["version"], "demonstration": False}
+        {
+            **selection,
+            "version": version or selection["version"],
+            "demonstration": False,
+            "trigger": "manual",
+        }
     ]
+
+
+def test_newest_release_is_the_default_and_all_selects_every_release(registry, selection):
+    reviewed = registry["documentdb"][selection["documentdb_version"]]
+    for release in ("0.9.0", "999.0.0"):
+        registry["documentdb"][release] = deepcopy(reviewed)
+    enabled = sorted(name for name, spec in registry["integrations"].items() if spec["enabled"])
+    newest = workflow.select_runs(registry, selection["integration"], None, None)
+    assert [run["documentdb_version"] for run in newest] == ["999.0.0"]
+    every = workflow.select_runs(registry, "all", None, "all", trigger="scheduled")
+    assert [(run["integration"], run["documentdb_version"]) for run in every] == [
+        (name, release)
+        for name in enabled
+        for release in sorted(registry["documentdb"], key=Version)
+    ]
+    assert all(run["trigger"] == "scheduled" for run in every)
+    release = workflow.select_runs(registry, "all", None, "0.9.0", trigger="documentdb_release")
+    assert [(run["integration"], run["documentdb_version"], run["trigger"]) for run in release] == [
+        (name, "0.9.0", "documentdb_release") for name in enabled
+    ]
+
+
+@pytest.mark.parametrize(
+    ("trigger", "integration", "version", "database", "demonstration", "error"),
+    [
+        ("scheduled", "all", None, None, False, "every reviewed DocumentDB release"),
+        ("scheduled", "all", None, "selected", False, "every reviewed DocumentDB release"),
+        ("documentdb_release", "all", None, None, False, "one reviewed release"),
+        ("documentdb_release", "all", None, "all", False, "one reviewed release"),
+        ("scheduled", "selected", None, "all", False, "every enabled integration"),
+        ("documentdb_release", "all", "selected", "selected", False, "every enabled integration"),
+        ("documentdb_release", "all", None, "selected", True, "every enabled integration"),
+        ("push", "all", None, "selected", False, "Unknown execution trigger"),
+    ],
+)
+def test_automatic_runs_cannot_narrow_the_reviewed_selection(
+    registry, selection, trigger, integration, version, database, demonstration, error
+):
+    with pytest.raises(ValueError, match=error):
+        workflow.select_runs(
+            registry,
+            selection["integration"] if integration == "selected" else integration,
+            selection["version"] if version == "selected" else version,
+            selection["documentdb_version"] if database == "selected" else database,
+            demonstration,
+            trigger=trigger,
+        )
+
+
+def test_changed_releases_are_added_or_re_pinned_entries(tmp_path, registry, selection):
+    release = selection["documentdb_version"]
+    previous = deepcopy(registry)
+    for added in ("999.0.0", "0.9.0"):
+        registry["documentdb"][added] = deepcopy(registry["documentdb"][release])
+    source = tmp_path / "previous.yaml"
+    source.write_text(yaml.safe_dump(previous))
+    assert workflow.changed_releases(registry, source) == ["0.9.0", "999.0.0"]
+    image = previous["documentdb"][release]["image"]
+    previous["documentdb"][release]["image"] = image[:-1] + ("1" if image[-1] == "0" else "0")
+    source.write_text(yaml.safe_dump(previous))
+    assert workflow.changed_releases(registry, source) == ["0.9.0", release, "999.0.0"]
+    previous["documentdb"] = deepcopy(registry["documentdb"])
+    previous["integrations"][selection["integration"]]["default_version"] = "0.0.0"
+    source.write_text(yaml.safe_dump(previous))
+    assert workflow.changed_releases(registry, source) == []
+
+
+@pytest.mark.parametrize(
+    "contents", [None, "", "{", "- documentdb\n", "schema_version: 1\n", "documentdb: []\n"]
+)
+def test_unreadable_previous_registry_selects_every_release(tmp_path, registry, contents):
+    source = tmp_path / "previous.yaml"
+    if contents is not None:
+        source.write_text(contents)
+    assert workflow.changed_releases(registry, source) == sorted(
+        registry["documentdb"], key=Version
+    )
 
 
 @pytest.mark.parametrize(
@@ -222,7 +306,7 @@ def test_unmatched_or_unreviewed_evidence_is_rejected_independently(
     for part in field[:-1]:
         target = target[part]
     target[field[-1]] = value
-    incoming = write_records(tmp_path / "incoming", records)
+    incoming = write_records(tmp_path / "incoming", records, selection["documentdb_version"])
     output = tmp_path / "report"
     assert not workflow.collect_report(incoming, output, registry, runs)
     _, rows, history = read_report(output)
@@ -271,6 +355,7 @@ def test_other_runs_and_attempts_never_fill_current_evidence(
         "directory",
         "file-link",
         "directory-link",
+        "integration-link",
     ],
 )
 def test_missing_or_malformed_artifacts_still_produce_a_combined_report(
@@ -278,7 +363,7 @@ def test_missing_or_malformed_artifacts_still_produce_a_combined_report(
 ):
     integration = selection["integration"]
     incoming = write_records(tmp_path / "incoming", records)
-    path = incoming / integration / "result.json"
+    path = incoming / integration / selection["documentdb_version"] / "result.json"
     path.unlink()
     if kind == "json":
         path.write_text("{")
@@ -295,6 +380,12 @@ def test_missing_or_malformed_artifacts_still_produce_a_combined_report(
     elif kind == "directory-link":
         path.parent.rmdir()
         path.parent.symlink_to(tmp_path / "absent-directory", target_is_directory=True)
+    elif kind == "integration-link":
+        # A valid record behind a linked integration directory is still rejected.
+        target = tmp_path / "linked-integration"
+        path.parent.parent.rename(target)
+        (target / path.parent.name / "result.json").write_text(json.dumps(records[integration]))
+        path.parent.parent.symlink_to(target, target_is_directory=True)
     output = tmp_path / "report"
     assert not workflow.collect_report(incoming, output, registry, runs)
     report, rows, history = read_report(output)
@@ -375,8 +466,8 @@ def test_conflicting_ids_do_not_overwrite_other_integration_evidence(
     # Exercise cross-integration collisions without requiring a second real adapter.
     monkeypatch.setattr("compatibility.results.suite_digest", lambda *_: first["suite_digest"])
     runs = [
-        {**selection, "demonstration": False},
-        {**selection, "integration": "additional", "demonstration": False},
+        {**selection, "demonstration": False, "trigger": "manual"},
+        {**selection, "integration": "additional", "demonstration": False, "trigger": "manual"},
     ]
     records = {first["integration"]: first, second["integration"]: second}
     incoming = write_records(tmp_path / "incoming", records)
@@ -389,11 +480,13 @@ def test_conflicting_ids_do_not_overwrite_other_integration_evidence(
     assert first in history and second not in history
 
 
+@pytest.mark.parametrize("level", ["integration", "release"])
 def test_unexpected_artifacts_are_reported_without_erasing_valid_results(
-    tmp_path, registry, runs, records
+    tmp_path, registry, selection, runs, records, level
 ):
     incoming = write_records(tmp_path / "incoming", records)
-    (incoming / "unexpected").mkdir()
+    parent = incoming if level == "integration" else incoming / selection["integration"]
+    (parent / "unexpected").mkdir()
     output = tmp_path / "report"
     assert not workflow.collect_report(incoming, output, registry, runs)
     report, rows, history = read_report(output)
@@ -401,6 +494,43 @@ def test_unexpected_artifacts_are_reported_without_erasing_valid_results(
     assert all(row["state"] == "Working" for row in rows.values())
     assert {record["integration"]: record for record in history} == records
     assert "Reporting errors" in (output / "summary.md").read_text()
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_scheduled_reports_keep_each_release_independent(
+    tmp_path, registry, selection, records, missing
+):
+    release = selection["documentdb_version"]
+    registry["documentdb"]["999.0.0"] = deepcopy(registry["documentdb"][release])
+    runs = workflow.select_runs(registry, "all", None, "all", trigger="scheduled")
+    incoming = tmp_path / "incoming"
+    expected = []
+    for index, database in enumerate(sorted(registry["documentdb"], key=Version)):
+        current = deepcopy(records)
+        for offset, record in enumerate(current.values()):
+            record.update(id=f"{index + 1:016x}{offset + 1:016x}", trigger="scheduled")
+            record["documentdb"]["version"] = database
+            expected.append(record)
+        if not (missing and database == "999.0.0"):
+            write_records(incoming, current)
+    output = tmp_path / "report"
+    assert workflow.collect_report(incoming, output, registry, runs) is not missing
+    report, _, history = read_report(output)
+    states = {
+        (row["integration"], row["documentdb_version"]): row["state"]
+        for row in report["integrations"]
+    }
+    assert states == {
+        (run["integration"], run["documentdb_version"]): (
+            "Not tested" if missing and run["documentdb_version"] == "999.0.0" else "Working"
+        )
+        for run in runs
+    }
+    assert sorted(history, key=lambda record: record["id"]) == [
+        record
+        for record in expected
+        if not (missing and record["documentdb"]["version"] == "999.0.0")
+    ]
 
 
 def test_nested_report_is_not_mistaken_for_an_incoming_artifact(tmp_path, registry, runs, records):
