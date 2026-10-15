@@ -304,6 +304,15 @@ def test_untrusted_source_runs_are_rejected(source_run, invalid):
         readme.source_attempt(source_run, workflow, REPOSITORY, "main")
 
 
+@pytest.mark.parametrize("event", ["workflow_dispatch", "schedule"])
+def test_dispatched_and_scheduled_source_runs_are_accepted(source_run, event):
+    workflow = {"path": readme.WORKFLOW_PATH, "id": source_run["workflow_id"]}
+    source_run["event"] = event
+    assert readme.source_attempt(source_run, workflow, REPOSITORY, "main")["run_id"] == (
+        source_run["id"]
+    )
+
+
 def test_prepare_keeps_failed_runs_and_ignores_demonstrations(source_run, monkeypatch):
     workflow = {"path": readme.WORKFLOW_PATH, "id": source_run["workflow_id"]}
     monkeypatch.setattr(

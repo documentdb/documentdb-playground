@@ -4,7 +4,8 @@ This registry-driven runner tests ecosystem integration profiles against reviewe
 DocumentDB releases. Execution, artifact verification, and result contracts are
 shared; each integration adapter implements its own scenario suite.
 
-The manual workflow selects enabled profiles and combines validated results as
+The GitHub Actions workflow runs on demand, daily, and for newly reviewed
+DocumentDB releases. It selects enabled profiles and combines validated results as
 Markdown, HTML, and JSON. A trusted publisher can append results to Git history
 with the persistence helper.
 
@@ -16,6 +17,9 @@ Adapter directories under [`integrations/`](integrations/) contain runtime recip
 and scenario suites. These definitions identify the package, runtime, and database
 combination for a run, not the newest upstream releases. Database and client base
 images are pinned by digest.
+
+Runs target the newest reviewed DocumentDB release by default.
+`--documentdb-version` selects another release listed in the registry.
 
 Version overrides must match the integration's registry policy and have eligible
 artifacts for its runtime. PyMongo versions use three numeric components, such as
@@ -210,24 +214,39 @@ approved destination, publisher, operational owner, and reporting route.
 
 Manual dispatch requires the workflow on the repository's default branch.
 Select **Ecosystem compatibility** in the Actions tab, then choose the branch
-and reviewed database release to exercise. The integration
-defaults to `all`: a planning job expands every enabled registry entry using its
-own reviewed default version. Select one integration for a focused run or version
-override. A version override with `all`, a disabled integration, a version outside
-its registry policy, or an unknown database release is rejected before test jobs
-start. Keep the failure demonstration disabled for real results.
+and, optionally, a reviewed database release. A blank release uses the newest
+reviewed release in the registry, and `all` selects every reviewed release. The
+integration defaults to `all`: a planning job expands every enabled registry entry
+using its own reviewed default version. Select one integration for a focused run
+or version override. A version override with `all`, a disabled integration, a
+version outside its registry policy, or an unknown database release is rejected
+before test jobs start. Keep the failure demonstration disabled for real results.
+
+The workflow also runs daily on the default branch. Scheduled runs test every
+enabled integration at its default version against every reviewed DocumentDB
+release.
+
+Each push to `main` that changes `registry.yaml` starts **Compatibility DocumentDB
+releases**. It compares the registry with the version before the push and
+dispatches this workflow once for each added or re-pinned release, with every
+enabled integration at its default version and the `documentdb_release` trigger.
+If the earlier registry is unavailable, every reviewed release is dispatched. The
+`trigger` input defaults to `manual`; a `documentdb_release` run requires one
+reviewed release and cannot narrow integrations, override versions, or enable the
+failure demonstration.
 
 Each matrix job runs its complete scenario suite against its own disposable
 database. Matrix fail-fast is disabled. JSON and available JUnit/logs are retained
-in `compatibility-results-<integration>-<attempt>` artifacts even when the job
-fails. Results record the `manual` trigger and exact workflow-attempt URL.
+in `compatibility-results-<integration>-<documentdb-version>-<attempt>` artifacts
+even when the job fails. Results record the trigger (`manual`, `scheduled`, or
+`documentdb_release`) and exact workflow-attempt URL.
 
 After the matrix finishes, reporting validates each selected result's identity,
-coverage, artifacts, suite digest, and workflow-attempt URL. The summary includes
-every selected integration. Missing or rejected results are **Not tested**, with
-a diagnostic, not fabricated envelopes or an earlier attempt's pass. Compatibility
-failures remain **Failing**, and failed or incomplete reports exit nonzero without
-suppressing matrix failures.
+trigger, coverage, artifacts, suite digest, and workflow-attempt URL. The summary
+includes every selected integration and database release. Missing or rejected
+results are **Not tested**, with a diagnostic, not fabricated envelopes or an
+earlier attempt's pass. Compatibility failures remain **Failing**, and failed or
+incomplete reports exit nonzero without suppressing matrix failures.
 
 The `compatibility-report-<attempt>` artifact contains `summary.md`, machine-readable
 `summary.json`, accepted envelopes in `results/`, and a combined preview in `site/`.
@@ -236,29 +255,35 @@ labeled demonstrations. All artifacts have 30-day retention.
 
 Use **Re-run all jobs** for a complete matrix rerun. Reporting deliberately
 collects only the current attempt's artifacts, so rerunning only failed jobs can
-leave other integrations without current-attempt evidence. Re-running an older
-workflow retains its original commit; dispatch a fresh run to test new code.
+leave other integrations or releases without current-attempt evidence. Re-running
+an older workflow retains its original commit; dispatch a fresh run to test new
+code.
 
-All jobs have read-only repository permissions. The workflow does not publish
-Git history, deploy a site, create issues, or change repository settings.
+All compatibility jobs have read-only repository permissions. The release
+dispatcher additionally receives `actions: write` only to start this workflow.
+Neither workflow publishes Git history, deploys a site, creates issues, or changes
+repository settings.
 Normal default-branch completions notify the separate README dashboard publisher.
 That publisher retains its own write permission; integration execution and report
 generation never receive publication credentials.
 
-To inspect selection or combine locally produced records:
+To inspect selection, combine locally produced records, or list the releases a
+registry change would dispatch:
 
 ```bash
 python -m compatibility.workflow matrix --integration all
+python -m compatibility.workflow matrix --documentdb-version all --trigger scheduled
 python -m compatibility.workflow report --integration all \
   --input compatibility/.test-results/incoming \
   --output compatibility/.test-results/combined-001
+python -m compatibility.workflow changed-releases --previous /path/to/previous-registry.yaml
 ```
 
-Place each record under `incoming/<integration>/result.json`. Use the same
-integration, version, database, and demonstration selection as the producing
-runs, and a fresh output directory. `--expected-run-url` binds a combined report
-to one workflow attempt; omit it for local results. `--summary` appends the
-Markdown report to a GitHub step-summary file.
+Place each record under `incoming/<integration>/<documentdb-version>/result.json`.
+Use the same integration, version, database, demonstration, and trigger selection
+as the producing runs, and a fresh output directory. `--expected-run-url` binds a
+combined report to one workflow attempt; omit it for local results. `--summary`
+appends the Markdown report to a GitHub step-summary file.
 
 ## Durable Git history
 
@@ -311,12 +336,12 @@ counts. An incomplete attempt cannot acquire an earlier attempt's success.
 Workflow failures without usable profile artifacts remain visible separately
 from older conclusive evidence. Synthetic demonstrations are excluded.
 
-`Compatibility README dashboard` consumes completed `Ecosystem compatibility`
-runs from the same repository's default branch. Test execution remains read-only;
-only the trusted publisher can write the data branch. The publisher checks the
-source run, workflow path, repository, branch, artifact attempt, and reviewed
-execution inputs. It reads source files to verify their digests but never executes
-source-run code or downloaded artifact content.
+`Compatibility README dashboard` consumes completed dispatched or scheduled
+`Ecosystem compatibility` runs from the same repository's default branch. Test
+execution remains read-only; only the trusted publisher can write the data branch.
+The publisher checks the source run, workflow path, repository, branch, artifact
+attempt, and reviewed execution inputs. It reads source files to verify their
+digests but never executes source-run code or downloaded artifact content.
 
 Result JSON files remain immutable. Workflow-attempt identity and execution time
 cannot be rewritten, while a later publication can recover previously unavailable
