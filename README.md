@@ -11,6 +11,14 @@ that your driver of choice behaves the way you expect. Others may target
 different environments (for example Kubernetes or a cloud deployment); each
 playground's README states what it needs.
 
+## Compatibility status
+
+[![PyMongo compatibility](/../compatibility-data/site/badges/pymongo.svg)](/../compatibility-data/site/README.md#pymongo)
+
+[Run details and accessible results](/../compatibility-data/site/README.md)
+show tested versions, actual execution timestamps, and the latest attempt
+separately from the last conclusive compatibility evidence.
+
 ## Playgrounds
 
 | Playground                              | Language / Stack         | What it shows                                                                    |
