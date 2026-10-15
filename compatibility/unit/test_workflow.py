@@ -1,21 +1,25 @@
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: MIT
 
-"""Keep manual runs read-only without turning failures into green jobs."""
+"""Keep dispatched and scheduled runs read-only without turning failures into green jobs."""
 
 import json
 import os
 import re
 import subprocess
+import sys
+from copy import deepcopy
 from fnmatch import fnmatchcase
 
 import pytest
 import yaml
+from packaging.version import Version
 
 from compatibility.contracts import ROOT, read_registry
 
 pytestmark = pytest.mark.unit
 WORKFLOW = ROOT / ".github/workflows/compatibility.yml"
+DISPATCHER = ROOT / ".github/workflows/compatibility-documentdb-release.yml"
 
 
 @pytest.fixture
@@ -23,15 +27,23 @@ def workflow():
     return yaml.safe_load(WORKFLOW.read_text())
 
 
-def test_workflow_is_manual_and_read_only(workflow):
+def test_workflow_is_dispatched_or_scheduled_and_read_only(workflow):
     # PyYAML's YAML 1.1 loader interprets the Actions "on" key as true.
-    assert set(workflow[True]) == {"workflow_dispatch"}
+    assert set(workflow[True]) == {"workflow_dispatch", "schedule"}
+    assert [len(entry["cron"].split()) for entry in workflow[True]["schedule"]] == [5]
+    inputs = workflow[True]["workflow_dispatch"]["inputs"]
     assert {
         "integration",
         "version",
         "documentdb_version",
         "demonstration",
-    } <= set(workflow[True]["workflow_dispatch"]["inputs"])
+        "trigger",
+    } <= set(inputs)
+    # The newest reviewed release comes from the registry rather than a workflow default.
+    assert "default" not in inputs["documentdb_version"]
+    assert inputs["documentdb_version"]["required"] is False
+    assert inputs["trigger"]["options"] == ["manual", "documentdb_release"]
+    assert inputs["trigger"]["default"] == "manual"
     assert workflow["permissions"] == {"contents": "read"}
     assert all(
         job.get("permissions", workflow["permissions"]) == {"contents": "read"}
@@ -51,7 +63,9 @@ def test_workflow_is_manual_and_read_only(workflow):
     assert {"all", *read_registry()["integrations"]} <= set(selector["options"])
 
 
-def test_actions_are_pinned_and_checkout_does_not_retain_credentials(workflow):
+@pytest.mark.parametrize("path", [WORKFLOW, DISPATCHER])
+def test_actions_are_pinned_and_checkout_does_not_retain_credentials(path):
+    workflow = yaml.safe_load(path.read_text())
     actions = [step for job in workflow["jobs"].values() for step in job["steps"] if "uses" in step]
     assert all(re.fullmatch(r"actions/[a-z-]+@[a-f0-9]{40}", step["uses"]) for step in actions)
     assert all(
@@ -63,14 +77,24 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(workflow):
 
 # These synthetic values exercise argument transport, not the reviewed release policy.
 @pytest.mark.parametrize(
-    ("version", "database", "demonstration", "extra", "exit_code", "watcher"),
+    ("version", "database", "demonstration", "trigger", "extra", "exit_code", "watcher"),
     [
-        ("", "", "", [], 0, False),
+        ("", "", "", "", [], 0, False),
         (
             "",
             "0.999.0",
             "false",
-            ["--documentdb-version", "0.999.0"],
+            "documentdb_release",
+            ["--documentdb-version", "0.999.0", "--trigger", "documentdb_release"],
+            0,
+            False,
+        ),
+        (
+            "",
+            "all",
+            "",
+            "scheduled",
+            ["--documentdb-version", "all", "--trigger", "scheduled"],
             0,
             False,
         ),
@@ -78,7 +102,16 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(workflow):
             "4.99.1",
             "0.999.0",
             "true",
-            ["--documentdb-version", "0.999.0", "--version", "4.99.1", "--demonstration"],
+            "manual",
+            [
+                "--documentdb-version",
+                "0.999.0",
+                "--version",
+                "4.99.1",
+                "--demonstration",
+                "--trigger",
+                "manual",
+            ],
             1,
             False,
         ),
@@ -86,7 +119,15 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(workflow):
             "4.99.0; echo unsafe",
             "0.999.0",
             "false",
-            ["--documentdb-version", "0.999.0", "--version", "4.99.0; echo unsafe"],
+            "manual",
+            [
+                "--documentdb-version",
+                "0.999.0",
+                "--version",
+                "4.99.0; echo unsafe",
+                "--trigger",
+                "manual",
+            ],
             0,
             False,
         ),
@@ -94,7 +135,8 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(workflow):
             "",
             "0.999.0; echo unsafe",
             "false",
-            ["--documentdb-version", "0.999.0; echo unsafe"],
+            "manual; echo unsafe",
+            ["--documentdb-version", "0.999.0; echo unsafe", "--trigger", "manual; echo unsafe"],
             0,
             False,
         ),
@@ -102,7 +144,8 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(workflow):
             "4.99.2",
             "0.999.0",
             "false",
-            ["--documentdb-version", "0.999.0", "--version", "4.99.2"],
+            "manual",
+            ["--documentdb-version", "0.999.0", "--version", "4.99.2", "--trigger", "manual"],
             0,
             True,
         ),
@@ -118,6 +161,7 @@ def test_actual_workflow_script_handles_defaults_and_dispatch_inputs(
     version,
     database,
     demonstration,
+    trigger,
     extra,
     exit_code,
     watcher,
@@ -135,6 +179,9 @@ def test_actual_workflow_script_handles_defaults_and_dispatch_inputs(
         """if [ "$3" = "matrix" ]; then printf '%s\\n' '{"include":[]}'; fi; """
         'return "$TEST_EXIT_CODE"; }\n'
     )
+    if watcher and job == "test":
+        # The planned matrix, not the dispatch input, carries the watcher trigger.
+        trigger = "upstream_release"
     captured = tmp_path / "arguments"
     output = tmp_path / "job-output"
     summary = tmp_path / "summary"
@@ -147,6 +194,7 @@ def test_actual_workflow_script_handles_defaults_and_dispatch_inputs(
             "INTEGRATION": integration,
             "DOCUMENTDB_VERSION": database,
             "DEMONSTRATION": demonstration,
+            "TRIGGER": trigger,
             "DETECTION_ID": "a" * 64 if watcher else "",
             "DISPATCH_ID": "b" * 32 if watcher else "",
             "EXPECTED_ARTIFACTS": ",".join(["c" * 64, "d" * 64]) if watcher else "",
@@ -179,9 +227,11 @@ def test_actual_workflow_script_handles_defaults_and_dispatch_inputs(
             "--documentdb-version",
             database,
             "--output",
-            f"results/{integration}/result.json",
+            f"results/{integration}/{database}/result.json",
             "--run-url",
             run_url,
+            "--trigger",
+            trigger,
             *(["--demonstration"] if demonstration == "true" else []),
         ]
     else:
@@ -201,8 +251,6 @@ def test_actual_workflow_script_handles_defaults_and_dispatch_inputs(
     if watcher:
         if job == "test":
             expected += [
-                "--trigger",
-                "upstream_release",
                 "--detection-id",
                 "a" * 64,
                 "--expected-artifact-sha256",
@@ -236,7 +284,7 @@ def test_failed_runs_keep_their_evidence_and_fail_the_job(workflow):
     assert upload["if"] == "always()"
     assert upload["with"]["if-no-files-found"] == "error"
     assert upload["with"]["path"] == "results/"
-    for variable in ("integration", "version", "documentdb_version", "demonstration"):
+    for variable in ("integration", "version", "documentdb_version", "demonstration", "trigger"):
         assert suite["env"][variable.upper()] == "${{ matrix." + variable + " }}"
 
 
@@ -251,6 +299,7 @@ def test_candidate_bundle_is_passed_as_data_without_shell_interpretation(workflo
         "VERSION": "7.99.0",
         "DOCUMENTDB_VERSION": "0.117.0",
         "DEMONSTRATION": "false",
+        "TRIGGER": "upstream_release",
         "DETECTION_ID": "a" * 64,
         "EXPECTED_ARTIFACTS": "b" * 64,
         "NPM_BUNDLE": bundle,
@@ -282,6 +331,31 @@ def test_candidate_bundle_is_passed_as_data_without_shell_interpretation(workflo
     ]
 
 
+def test_plan_and_report_resolve_the_same_selection(workflow):
+    plan, report = (
+        next(
+            step
+            for step in workflow["jobs"][job]["steps"]
+            if "compatibility.workflow" in step.get("run", "")
+        )
+        for job in ("plan", "report")
+    )
+    selection = (
+        "INTEGRATION",
+        "VERSION",
+        "DOCUMENTDB_VERSION",
+        "DEMONSTRATION",
+        "TRIGGER",
+        "DETECTION_ID",
+        "DISPATCH_ID",
+    )
+    assert {name: plan["env"][name] for name in selection} == {
+        name: report["env"][name] for name in selection
+    }
+    assert "github.event_name == 'schedule' && 'all'" in plan["env"]["DOCUMENTDB_VERSION"]
+    assert "github.event_name == 'schedule' && 'scheduled'" in plan["env"]["TRIGGER"]
+
+
 def test_combined_reporting_runs_after_test_and_download_failures(workflow):
     job = workflow["jobs"]["report"]
     assert set(job["needs"]) == {"plan", "test"}
@@ -307,7 +381,7 @@ def test_combined_reporting_runs_after_test_and_download_failures(workflow):
     assert upload["with"]["if-no-files-found"] == "error"
 
 
-def test_artifacts_are_distinct_per_integration_and_attempt(workflow, registry):
+def test_artifacts_are_distinct_per_integration_release_and_attempt(workflow, registry):
     uploads = {
         name: next(
             step["with"]
@@ -325,21 +399,88 @@ def test_artifacts_are_distinct_per_integration_and_attempt(workflow, registry):
     for attempt in (1, 2):
         current_pattern = pattern.replace("${{ github.run_attempt }}", str(attempt))
         for integration in registry["integrations"]:
-            name = (
-                uploads["test"]["name"]
-                .replace("${{ matrix.integration }}", integration)
-                .replace("${{ github.run_attempt }}", str(attempt))
-            )
-            assert name not in names
-            assert fnmatchcase(name, current_pattern)
-            assert not fnmatchcase(
-                name, pattern.replace("${{ github.run_attempt }}", str(attempt + 1))
-            )
-            names.add(name)
+            for release in [*registry["documentdb"], "0.999.0", "10.1.0"]:
+                name = (
+                    uploads["test"]["name"]
+                    .replace("${{ matrix.integration }}", integration)
+                    .replace("${{ matrix.documentdb_version }}", release)
+                    .replace("${{ github.run_attempt }}", str(attempt))
+                )
+                assert name not in names
+                assert fnmatchcase(name, current_pattern)
+                assert not fnmatchcase(
+                    name, pattern.replace("${{ github.run_attempt }}", str(attempt + 1))
+                )
+                names.add(name)
         combined = uploads["report"]["name"].replace("${{ github.run_attempt }}", str(attempt))
         assert combined not in names and not fnmatchcase(combined, current_pattern)
         names.add(combined)
     assert all(settings["retention-days"] == 30 for settings in uploads.values())
+
+
+def test_release_dispatcher_runs_only_for_registry_changes_on_main():
+    dispatcher = yaml.safe_load(DISPATCHER.read_text())
+    assert dispatcher[True] == {
+        "push": {"branches": ["main"], "paths": ["compatibility/registry.yaml"]}
+    }
+    assert dispatcher["permissions"] == {"contents": "read"}
+    assert [job["permissions"] for job in dispatcher["jobs"].values()] == [
+        {"actions": "write", "contents": "read"}
+    ]
+    assert "secrets." not in DISPATCHER.read_text()
+
+
+@pytest.mark.parametrize(
+    "change", ["unavailable", "unchanged", "added", "re-pinned", "integration-only"]
+)
+def test_release_dispatcher_starts_runs_for_added_or_re_pinned_releases(tmp_path, registry, change):
+    (job,) = yaml.safe_load(DISPATCHER.read_text())["jobs"].values()
+    step = next(step for step in job["steps"] if "gh workflow run" in step.get("run", ""))
+    release = max(registry["documentdb"], key=Version)
+    previous = deepcopy(registry)
+    if change == "added":
+        del previous["documentdb"][release]
+    elif change == "re-pinned":
+        image = previous["documentdb"][release]["image"]
+        previous["documentdb"][release]["image"] = image[:-1] + ("1" if image[-1] == "0" else "0")
+    elif change == "integration-only":
+        previous["integrations"]["pymongo"]["default_version"] = "4.9.0"
+    source = tmp_path / "source-registry.yaml"
+    source.write_text(yaml.safe_dump(previous))
+    stubs = (
+        'git() { [ "$*" = "show $BEFORE:compatibility/registry.yaml" ] '
+        '&& [ "$CHANGE" != unavailable ] && cat "$SOURCE"; }\n'
+        'gh() { printf "%s\\n" "$*" >> "$DISPATCHED"; }\n'
+        'python() { "$PYTHON" "$@"; }\n'
+    )
+    dispatched = tmp_path / "dispatched"
+    process = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", stubs + step["run"]],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "BEFORE": "a" * 40,
+            "CHANGE": change,
+            "SOURCE": str(source),
+            "DISPATCHED": str(dispatched),
+            "PYTHON": sys.executable,
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_REF_NAME": "main",
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert process.returncode == 0, process.stderr
+    if change == "unavailable":
+        expected = sorted(registry["documentdb"], key=Version)
+    else:
+        expected = [] if change in ("unchanged", "integration-only") else [release]
+    assert (dispatched.read_text().splitlines() if dispatched.exists() else []) == [
+        "workflow run compatibility.yml --ref main -f integration=all "
+        f"-f documentdb_version={name} -f trigger=documentdb_release"
+        for name in expected
+    ]
 
 
 def test_infrastructure_is_checked_without_starting_an_integration():

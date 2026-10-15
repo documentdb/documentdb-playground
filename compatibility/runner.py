@@ -31,6 +31,7 @@ from compatibility.contracts import (
     PYTHON_PLATFORMS,
     ROOT,
     compatibility_state,
+    default_documentdb_version,
     expected_tests,
     read_registry,
     suite_digest,
@@ -491,13 +492,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--integration", default="pymongo")
     parser.add_argument("--version", help="Defaults to the selected integration's registry version")
-    parser.add_argument("--documentdb-version", default="0.117.0")
+    parser.add_argument(
+        "--documentdb-version", help="Defaults to the newest reviewed registry release"
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--wheelhouse", type=Path)
     parser.add_argument("--package-cache", type=Path, help="Reuse integrity-checked npm archives")
     parser.add_argument("--run-url")
     parser.add_argument(
-        "--trigger", choices=("manual", "push", "upstream_release"), default="manual"
+        "--trigger",
+        choices=("manual", "push", "scheduled", "documentdb_release", "upstream_release"),
+        default="manual",
     )
     parser.add_argument("--detection-id")
     parser.add_argument(
@@ -516,7 +521,7 @@ def main() -> int:
             registry,
             args.integration,
             version,
-            args.documentdb_version,
+            args.documentdb_version or default_documentdb_version(registry),
             args.output,
             wheelhouse=args.wheelhouse,
             package_cache=args.package_cache,

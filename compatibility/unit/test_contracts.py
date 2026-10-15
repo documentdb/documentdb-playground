@@ -12,6 +12,7 @@ from compatibility import contracts
 from compatibility.contracts import (
     artifact_sha256,
     compatibility_state,
+    default_documentdb_version,
     result_runtime,
     suite_digest,
     validate_client_report,
@@ -162,6 +163,12 @@ def test_mutable_database_image_rejected(registry, selection):
     database["image"] = database["image"].split("@", 1)[0] + ":latest"
     with pytest.raises(ValueError):
         validate_schema(registry, "registry")
+
+
+def test_default_database_is_the_newest_reviewed_release(registry):
+    database = next(iter(registry["documentdb"].values()))
+    registry["documentdb"] = {version: database for version in ("0.9.0", "0.117.0", "0.12.0")}
+    assert default_documentdb_version(registry) == "0.117.0"
 
 
 def test_invalid_client_envelope_rejected():
