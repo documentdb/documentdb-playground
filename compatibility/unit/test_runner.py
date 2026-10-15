@@ -13,7 +13,12 @@ import time
 import pytest
 
 from compatibility import runner
-from compatibility.contracts import ROOT, compatibility_state, suite_files
+from compatibility.contracts import (
+    ROOT,
+    compatibility_state,
+    default_documentdb_version,
+    suite_files,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -39,7 +44,7 @@ def test_shell_metacharacters_rejected_before_execution(tmp_path, registry, sele
         runner.execute(registry, **selection, output=tmp_path / "result.json")
 
 
-@pytest.mark.parametrize("trigger", ["manual", "push"])
+@pytest.mark.parametrize("trigger", ["manual", "push", "scheduled", "documentdb_release"])
 def test_setup_failure_produces_not_tested_and_cleans_up(
     tmp_path, registry, selection, monkeypatch, trigger
 ):
@@ -59,7 +64,7 @@ def test_setup_failure_produces_not_tested_and_cleans_up(
     assert result["trigger"] == trigger
 
 
-@pytest.mark.parametrize("trigger", ["manual", "push"])
+@pytest.mark.parametrize("trigger", ["manual", "push", "scheduled", "documentdb_release"])
 def test_cli_forwards_the_execution_trigger(tmp_path, record, monkeypatch, trigger):
     captured = {}
 
@@ -99,9 +104,10 @@ def test_cli_selects_the_registry_default(tmp_path, record, registry, selection,
         ["runner", "--integration", integration, "--output", str(tmp_path / "result.json")],
     )
     assert runner.main() == 0
-    assert captured[0][1:3] == (
+    assert captured[0][1:4] == (
         integration,
         registry["integrations"][integration]["default_version"],
+        default_documentdb_version(registry),
     )
 
 

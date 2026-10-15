@@ -30,6 +30,7 @@ from compatibility.results import (
 
 OFFICIAL_REPOSITORY = "documentdb/documentdb-playground"
 WORKFLOW_PATH = ".github/workflows/compatibility.yml"
+SOURCE_EVENTS = ("workflow_dispatch", "schedule")
 DEMONSTRATION_TITLE = "Ecosystem compatibility (demonstration)"
 PROFILE_FIELDS = ("integration", "documentdb_version", "upstream_version", "profile")
 COLORS = {
@@ -90,7 +91,7 @@ def source_attempt(
         run["repository"]["full_name"] != repository
         or run["head_repository"]["full_name"] != repository
         or run["head_branch"] != branch
-        or run["event"] != "workflow_dispatch"
+        or run["event"] not in SOURCE_EVENTS
         or run["status"] != "completed"
         or workflow["path"] != WORKFLOW_PATH
         or workflow["id"] != run["workflow_id"]
