@@ -122,6 +122,8 @@ Freshness and intentional-failure exclusion follow the same rules as the details
 The dashboard shows client and DocumentDB versions, the last conclusive evidence,
 the latest attempt's outcome and execution timestamp, and verified scenario
 counts. An incomplete attempt cannot acquire an earlier attempt's success.
+Evidence is ordered by its workflow attempt rather than by test start time, so an
+older run that starts its tests late cannot mask a newer attempt's outcome.
 Workflow failures without usable profile artifacts remain visible separately
 from older conclusive evidence. Synthetic demonstrations are excluded.
 

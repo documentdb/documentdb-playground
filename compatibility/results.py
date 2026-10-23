@@ -10,6 +10,7 @@ import os
 import re
 import tempfile
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -100,8 +101,12 @@ def dashboard_rows(
     now: datetime,
     *,
     expected_runs: dict[RunKey, str | None] | None = None,
+    order: Callable[[dict[str, Any]], Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Keep version pairs and demonstrations separate; retain the last conclusive result."""
+    """Keep version pairs and demonstrations separate; retain the last conclusive result.
+
+    `order` ranks results from oldest to newest and defaults to their test start time.
+    """
     groups: dict[RunKey, list[dict[str, Any]]] = defaultdict(list)
     for result in results:
         validate_result(result)
@@ -122,7 +127,8 @@ def dashboard_rows(
         if spec is None:
             raise ValueError("History references an integration absent from the registry")
         history.sort(
-            key=lambda record: (timestamp(record["started_at"]), record["id"]), reverse=True
+            key=order or (lambda record: (timestamp(record["started_at"]), record["id"])),
+            reverse=True,
         )
         latest = history[0] if history else None
         conclusive = [r for r in history if compatibility_state(r) in ("Working", "Failing")]

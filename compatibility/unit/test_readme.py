@@ -149,6 +149,32 @@ def test_missing_latest_artifact_does_not_inherit_an_earlier_pass(
     assert "pymongo: Not tested" in readme.badge_svg(view, "pymongo")
 
 
+@pytest.mark.parametrize("evidence", ["missing", "failed"])
+def test_newer_workflow_attempt_outranks_later_test_start(
+    tmp_path, registry, published_record, attempt, evidence
+):
+    append_result(tmp_path / "results", published_record)
+    readme.save_attempt(tmp_path, attempt, REPOSITORY)
+    newer = deepcopy(attempt)
+    newer.update(
+        run_id=43,
+        run_url=readme.run_url(REPOSITORY, 43, 1),
+        started_at=(timestamp(published_record["started_at"]) - timedelta(seconds=5)).isoformat(),
+        conclusion="failure",
+    )
+    failed = deepcopy(published_record)
+    failed.update(id="b" * 32, run_url=newer["run_url"], started_at=newer["started_at"])
+    failed["tests"][0]["outcome"] = "failed"
+    incoming = incoming_report(tmp_path / "incoming", failed, include_result=evidence == "failed")
+    readme.ingest({"action": "publish", "attempt": newer}, ROOT, incoming, tmp_path, REPOSITORY)
+    view = readme.snapshot(tmp_path, registry, REPOSITORY, datetime.now(timezone.utc))
+    row = selected_row(view, published_record)
+    expected = ("Working", "Not tested") if evidence == "missing" else ("Failing", "Failing")
+    assert (row["state"], row["latest_attempt_state"]) == expected
+    assert row["run_url"] == newer["run_url"] and view["latest_workflow"]["run_id"] == 43
+    assert f"pymongo: {expected[1]}" in readme.badge_svg(view, "pymongo")
+
+
 def test_failure_before_a_report_exists_is_visible(tmp_path, registry, attempt):
     attempt["conclusion"] = "failure"
     attempt["profiles"] = []
