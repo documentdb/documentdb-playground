@@ -1,0 +1,49 @@
+{
+  "integrations": [
+    {
+      "conclusive_at": null,
+      "demonstration": false,
+      "detection_id": null,
+      "documentdb_version": "0.117.0",
+      "error": null,
+      "expected": 17,
+      "freshness_days": 7,
+      "integration": "pymongo",
+      "last_attempt": null,
+      "last_success": null,
+      "latest_attempt_state": "Not tested",
+      "owner": "@documentdb/documentdb-maintainers",
+      "passed": 0,
+      "previous_state": "Not tested",
+      "profile": "python312-linux-x64-sync",
+      "repository": "https://github.com/mongodb/mongo-python-driver",
+      "run_url": null,
+      "scenarios": [
+        "test_authenticated_ping",
+        "test_insert_one",
+        "test_insert_many",
+        "test_find_one",
+        "test_find_filter_projection_sort_limit",
+        "test_cursor_batches",
+        "test_count_documents",
+        "test_update_one",
+        "test_find_one_and_update",
+        "test_delete_one",
+        "test_delete_many",
+        "test_aggregate",
+        "test_create_indexes",
+        "test_list_indexes",
+        "test_drop_index",
+        "test_duplicate_key_error",
+        "test_bson_round_trip"
+      ],
+      "state": "Not tested",
+      "trigger": null,
+      "upstream_version": "4.18.0"
+    }
+  ],
+  "latest_workflow": null,
+  "preview": false,
+  "repository": "documentdb/documentdb-playground",
+  "schema_version": 1
+}
