@@ -1,9 +1,9 @@
-"""Beanie / Motor connection helpers for DocumentDB.
+"""Beanie / PyMongo async connection helpers for DocumentDB.
 
 DocumentDB exposes a single gateway endpoint that speaks the MongoDB wire
 protocol but advertises itself as a *standalone* server (not a replica set).
-Beanie talks to it through Motor (async PyMongo), so the driver needs three
-tweaks:
+Beanie talks to it through PyMongo's ``AsyncMongoClient``, so the driver needs
+three tweaks:
 
   - directConnection=True         -> don't attempt replica-set topology
                                      discovery (the gateway is standalone).
@@ -24,9 +24,9 @@ import os
 import re
 
 from beanie import init_beanie
-from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import AsyncMongoClient
 
-_client: AsyncIOMotorClient | None = None
+_client: AsyncMongoClient | None = None
 
 
 def sanitize_uri(uri: str | None) -> str:
@@ -42,7 +42,7 @@ def sanitize_uri(uri: str | None) -> str:
 
 
 def build_client_kwargs() -> dict:
-    """Return the Motor client kwargs DocumentDB's gateway requires."""
+    """Return the AsyncMongoClient kwargs DocumentDB's gateway requires."""
     tls_insecure = os.environ.get("TLS_INSECURE", "true").lower() != "false"
     return {
         "directConnection": True,
@@ -53,17 +53,17 @@ def build_client_kwargs() -> dict:
 
 
 async def init(document_models, uri: str | None = None, db_name: str | None = None):
-    """Connect Motor to DocumentDB and initialise Beanie for ``document_models``."""
+    """Connect to DocumentDB and initialise Beanie for ``document_models``."""
     global _client
     clean_uri = sanitize_uri(uri or os.environ.get("MONGO_URI"))
     database_name = db_name or os.environ.get("MONGO_DB", "beanie_demo")
 
-    _client = AsyncIOMotorClient(clean_uri, **build_client_kwargs())
+    _client = AsyncMongoClient(clean_uri, **build_client_kwargs())
     await init_beanie(database=_client[database_name], document_models=document_models)
     return _client
 
 
-def get_client() -> AsyncIOMotorClient | None:
+def get_client() -> AsyncMongoClient | None:
     return _client
 
 
@@ -78,5 +78,5 @@ async def ping() -> bool:
 async def close() -> None:
     global _client
     if _client is not None:
-        _client.close()
+        await _client.close()
         _client = None

@@ -1,8 +1,8 @@
 # Beanie with DocumentDB (local)
 
 This playground shows how to use [Beanie](https://beanie-odm.dev/), a popular
-**asynchronous Python ODM** built on [Motor](https://motor.readthedocs.io/)
-(async PyMongo) and [Pydantic](https://docs.pydantic.dev/), against DocumentDB —
+**asynchronous Python ODM** built on [PyMongo](https://pymongo.readthedocs.io/)'s
+native async API and [Pydantic](https://docs.pydantic.dev/), against DocumentDB —
 running **entirely on your machine**. It includes:
 
 - a small **FastAPI + Beanie REST API** (`app/`), and
@@ -18,7 +18,7 @@ connect straight to it.
 > **What is Beanie?** Beanie is a **Python library** (an async ODM, Object
 > Document Mapper), not a CLI tool or a server. Your application imports it to
 > define `Document` models (Pydantic classes) and talk to a MongoDB-compatible
-> database over Motor. Here it is used by the demo **app**
+> database over PyMongo's `AsyncMongoClient`. Here it is used by the demo **app**
 > ([`app/main.py`](app/main.py)) and the standalone **test script**
 > ([`app/beanie_crud_test.py`](app/beanie_crud_test.py)).
 
@@ -40,14 +40,16 @@ Everything is local. The emulator container exposes the MongoDB wire protocol on
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-Beanie talks to the emulator through Motor exactly as it would to a standalone
-`mongod`, with a few required options (see [Connecting Beanie to
-DocumentDB](#connecting-beanie-to-documentdb)).
+Beanie talks to the emulator through PyMongo's `AsyncMongoClient` exactly as it
+would to a standalone `mongod`, with a few required options (see [Connecting
+Beanie to DocumentDB](#connecting-beanie-to-documentdb)).
 
 ## Prerequisites
 
 - **Docker** (to run the `documentdb-local` emulator)
-- **Python 3.10+** with `venv` (to run the app and test suite)
+- **Python 3.10 to 3.13** with `venv` (to run the app and test suite). Beanie
+  2.x declares `Requires-Python <3.14`, so pip cannot install it on newer
+  interpreters (see [Troubleshooting](#no-matching-distribution-found-for-beanie)).
 
 The scripts create a Python virtualenv and install dependencies for you. On
 Windows, run these from a **WSL** shell.
@@ -107,14 +109,15 @@ curl -s http://localhost:3000/stats/genres | jq .
 ## Connecting Beanie to DocumentDB
 
 The DocumentDB gateway speaks the MongoDB wire protocol but advertises itself as
-a **standalone** server over **TLS** (with a self-signed cert). Beanie talks to
-it through Motor, which therefore needs these options (see [`app/db.py`](app/db.py)):
+a **standalone** server over **TLS** (with a self-signed cert). Beanie 2.x talks
+to it through PyMongo's `AsyncMongoClient` (not Motor), and that client needs
+these options (see [`app/db.py`](app/db.py)):
 
 ```python
-from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import AsyncMongoClient
 from beanie import init_beanie
 
-client = AsyncIOMotorClient(
+client = AsyncMongoClient(
     uri,
     directConnection=True,             # gateway is standalone, not a replica set
     tls=True,                          # gateway only accepts TLS
@@ -122,6 +125,12 @@ client = AsyncIOMotorClient(
 )
 await init_beanie(database=client[db_name], document_models=[Book])
 ```
+
+For operations Beanie does not model, `Book.get_pymongo_collection()` returns
+the underlying PyMongo `AsyncCollection`. Its I/O methods are coroutines,
+including `aggregate()`, which resolves to a cursor
+(`cursor = await collection.aggregate(pipeline)`), whereas `find()` returns a
+cursor without awaiting. Close the client with `await client.close()`.
 
 The connection string built by the scripts is:
 
@@ -161,12 +170,12 @@ for you from the variables above.
 | `MONGO_URI`                   | _(set by scripts)_ | DocumentDB connection string. The test script also accepts it as the first CLI argument.  |
 | `MONGO_DB`                    | `beanie_demo` (app), `beanie_test` (test) | Database name Beanie connects to.                                    |
 | `TLS_INSECURE`                | `true`           | When `true`, accepts the self-signed cert. Set `false` for CA-verified TLS.                  |
-| `SERVER_SELECTION_TIMEOUT_MS` | `10000`          | How long Motor waits to select a server before erroring.                                     |
+| `SERVER_SELECTION_TIMEOUT_MS` | `10000`          | How long PyMongo waits to select a server before erroring.                                   |
 | `PORT`                        | `3000`           | Port the FastAPI/Uvicorn API listens on.                                                     |
 
 ## DocumentDB Compatibility Notes
 
-Verified against `documentdb-local:latest` (release `0.114`):
+Verified against `documentdb-local:latest` (release `0.117`):
 
 | Beanie feature                          | Status        | Notes                                                                 |
 | --------------------------------------- | ------------- | --------------------------------------------------------------------- |
@@ -246,6 +255,20 @@ Passed: 16  Failed: 0
 
 ## Troubleshooting
 
+### `No matching distribution found for beanie`
+
+pip reports this, along with `Ignored the following versions that require a
+different python version`, when the virtualenv uses Python 3.14 or newer. Beanie
+2.x supports Python 3.10 to 3.13. The scripts create `app/.venv` with `python3`
+only when it does not exist yet, so recreate it with a supported interpreter and
+rerun:
+
+```bash
+rm -rf app/.venv
+python3.13 -m venv app/.venv
+./scripts/run-test.sh
+```
+
 ### `AuthenticationFailed: Username is invalid.`
 
 The emulator rejects certain reserved usernames — notably `documentdb`. Use a
@@ -291,7 +314,7 @@ beanie/
 ├── README.md
 ├── app/
 │   ├── requirements.txt
-│   ├── db.py                    # Motor connection + init_beanie (DocumentDB options)
+│   ├── db.py                    # AsyncMongoClient connection + init_beanie (DocumentDB options)
 │   ├── main.py                  # FastAPI REST API (/books, /health, /stats)
 │   ├── models/
 │   │   └── book.py              # Example Beanie Document model

@@ -8,8 +8,9 @@ Or pass the URI as the first argument:
     python beanie_crud_test.py "mongodb://user:pass@host:10260/?..."
 
 Exercises connect, index creation, insert, find, update, aggregation,
-unique-index enforcement, and delete using Beanie/Motor against the DocumentDB
-gateway. Exits non-zero on the first real failure.
+unique-index enforcement, and delete using Beanie and PyMongo's
+``AsyncMongoClient`` against the DocumentDB gateway. Exits non-zero on the
+first real failure.
 """
 
 from __future__ import annotations
@@ -23,9 +24,8 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from beanie import Document, init_beanie
-from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import Field
-from pymongo import ASCENDING, DESCENDING, IndexModel, ReturnDocument
+from pymongo import ASCENDING, DESCENDING, AsyncMongoClient, IndexModel, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 URI = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("MONGO_URI")
@@ -87,12 +87,12 @@ async def run() -> int:
     # Fresh collection per run keeps the test idempotent.
     Widget.Settings.name = f"widgets_{int(time.time() * 1000)}"
 
-    client: Optional[AsyncIOMotorClient] = None
+    client: Optional[AsyncMongoClient] = None
     connected = False
 
     async def _connect() -> None:
         nonlocal client, connected
-        client = AsyncIOMotorClient(
+        client = AsyncMongoClient(
             sanitize_uri(URI),
             directConnection=True,
             tls=True,
@@ -111,7 +111,7 @@ async def run() -> int:
         print("\nConnection failed; aborting remaining steps.", file=sys.stderr)
         return 1
 
-    coll = Widget.get_motor_collection()
+    coll = Widget.get_pymongo_collection()
 
     async def _create_indexes() -> None:
         await coll.create_indexes(
@@ -255,7 +255,9 @@ async def run() -> int:
     await step("vector index + insert (cosmosSearch vector-ivf)", _vector_index_insert)
 
     async def _vector_search() -> None:
-        hits = await vectors.aggregate(
+        # Unlike Beanie's Document.aggregate(), PyMongo's AsyncCollection.aggregate()
+        # is a coroutine, so await it to get the cursor.
+        cursor = await vectors.aggregate(
             [
                 {
                     "$vectorSearch": {
@@ -268,7 +270,8 @@ async def run() -> int:
                 },
                 {"$project": {"name": 1, "_id": 0}},
             ]
-        ).to_list(length=10)
+        )
+        hits = await cursor.to_list(length=10)
         if not hits:
             raise RuntimeError("vector search returned no results")
         if hits[0].get("name") != "a":
@@ -287,7 +290,7 @@ async def run() -> int:
     await step("cleanup (drop collection)", _drop)
 
     if client is not None:
-        client.close()
+        await client.close()
 
     print("\n====================================")
     print(f"Passed: {passed}  Failed: {failed}")
