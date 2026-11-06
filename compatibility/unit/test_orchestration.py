@@ -72,16 +72,13 @@ def test_all_uses_each_enabled_default_and_accepts_new_registry_entries(registry
     extra.update(default_version="99.1.2", version_pattern=r"^99\.1\.2$")
     registry["integrations"]["additional"] = extra
     registry["integrations"][selection["integration"]]["enabled"] = False
-    runs = workflow.select_runs(registry, "all", None, selection["documentdb_version"], True)
+    runs = workflow.select_runs(registry, "all", None, selection["documentdb_version"])
     assert {run["integration"]: run["version"] for run in runs} == {
         name: spec["default_version"]
         for name, spec in registry["integrations"].items()
         if spec["enabled"]
     }
-    assert all(
-        run["documentdb_version"] == selection["documentdb_version"] and run["demonstration"]
-        for run in runs
-    )
+    assert all(run["documentdb_version"] == selection["documentdb_version"] for run in runs)
 
 
 @pytest.mark.parametrize("override", [False, True])
@@ -94,7 +91,6 @@ def test_single_integration_default_and_override(registry, selection, other_vers
         {
             **selection,
             "version": version or selection["version"],
-            "demonstration": False,
             "trigger": "manual",
         }
     ]
@@ -121,20 +117,19 @@ def test_newest_release_is_the_default_and_all_selects_every_release(registry, s
 
 
 @pytest.mark.parametrize(
-    ("trigger", "integration", "version", "database", "demonstration", "error"),
+    ("trigger", "integration", "version", "database", "error"),
     [
-        ("scheduled", "all", None, None, False, "every reviewed DocumentDB release"),
-        ("scheduled", "all", None, "selected", False, "every reviewed DocumentDB release"),
-        ("documentdb_release", "all", None, None, False, "one reviewed release"),
-        ("documentdb_release", "all", None, "all", False, "one reviewed release"),
-        ("scheduled", "selected", None, "all", False, "every enabled integration"),
-        ("documentdb_release", "all", "selected", "selected", False, "every enabled integration"),
-        ("documentdb_release", "all", None, "selected", True, "every enabled integration"),
-        ("push", "all", None, "selected", False, "Unknown execution trigger"),
+        ("scheduled", "all", None, None, "every reviewed DocumentDB release"),
+        ("scheduled", "all", None, "selected", "every reviewed DocumentDB release"),
+        ("documentdb_release", "all", None, None, "one reviewed release"),
+        ("documentdb_release", "all", None, "all", "one reviewed release"),
+        ("scheduled", "selected", None, "all", "every enabled integration"),
+        ("documentdb_release", "all", "selected", "selected", "every enabled integration"),
+        ("push", "all", None, "selected", "Unknown execution trigger"),
     ],
 )
 def test_automatic_runs_cannot_narrow_the_reviewed_selection(
-    registry, selection, trigger, integration, version, database, demonstration, error
+    registry, selection, trigger, integration, version, database, error
 ):
     with pytest.raises(ValueError, match=error):
         workflow.select_runs(
@@ -142,7 +137,6 @@ def test_automatic_runs_cannot_narrow_the_reviewed_selection(
             selection["integration"] if integration == "selected" else integration,
             selection["version"] if version == "selected" else version,
             selection["documentdb_version"] if database == "selected" else database,
-            demonstration,
             trigger=trigger,
         )
 
@@ -244,7 +238,10 @@ def test_combined_passes_preserve_envelopes_and_share_dashboard_data(
     for integration, row in rows.items():
         assert row["state"] == "Working"
         assert row["passed"] == row["expected"] == len(records[integration]["expected_tests"])
-        assert row["run_url"] == RUN_URL and row["issue_url"] is None
+        assert row["run_url"] == RUN_URL
+        assert row["issue_url"].startswith(
+            "https://github.com/documentdb/documentdb-playground/issues/new?"
+        )
     assert (
         json.loads((output / "site/current.json").read_text())["integrations"]
         == report["integrations"]
@@ -424,37 +421,6 @@ def test_override_has_only_the_selected_integration_and_version(
         assert not list((output / "results").glob("*.json"))
 
 
-@pytest.mark.parametrize("missing", [False, True])
-def test_demonstrations_have_separate_rows_and_complete_expected_coverage(
-    tmp_path, registry, selection, records, missing
-):
-    runs = workflow.select_runs(registry, "all", None, selection["documentdb_version"], True)
-    for integration, record in records.items():
-        record["demonstration"] = True
-        record["expected_tests"] = expected_tests(registry["integrations"][integration], True)
-        record["tests"].append(
-            {
-                "id": record["expected_tests"][-1],
-                "outcome": "failed",
-                "message": "Deliberate mismatch",
-            }
-        )
-    incoming = tmp_path / "incoming"
-    if not missing:
-        write_records(incoming, records)
-    output = tmp_path / "report"
-    assert not workflow.collect_report(incoming, output, registry, runs)
-    _, rows, history = read_report(output)
-    assert set(rows) == set(records)
-    for integration, row in rows.items():
-        assert row["demonstration"]
-        assert row["scenarios"] == expected_tests(registry["integrations"][integration], True)
-        assert row["expected"] == len(row["scenarios"])
-        assert row["state"] == ("Not tested" if missing else "Failing")
-    assert all(record["demonstration"] for record in history)
-    assert "Demonstration" in (output / "summary.md").read_text()
-
-
 def test_conflicting_ids_do_not_overwrite_other_integration_evidence(
     tmp_path, registry, selection, record, monkeypatch
 ):
@@ -466,8 +432,8 @@ def test_conflicting_ids_do_not_overwrite_other_integration_evidence(
     # Exercise cross-integration collisions without requiring a second real adapter.
     monkeypatch.setattr("compatibility.results.suite_digest", lambda *_: first["suite_digest"])
     runs = [
-        {**selection, "demonstration": False, "trigger": "manual"},
-        {**selection, "integration": "additional", "demonstration": False, "trigger": "manual"},
+        {**selection, "trigger": "manual"},
+        {**selection, "integration": "additional", "trigger": "manual"},
     ]
     records = {first["integration"]: first, second["integration"]: second}
     incoming = write_records(tmp_path / "incoming", records)

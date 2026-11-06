@@ -9,7 +9,6 @@
     table { width: 100%; border-collapse: collapse; }
     th, td { padding: .7rem; border: 1px solid #ccc; text-align: left; vertical-align: top; }
     .Working { color: #176b2c; } .Failing { color: #a4161a; } .Stale { color: #805600; }
-    .notice { background: #fff4d6; padding: 1rem; }
     pre { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 45rem; }
     time { white-space: nowrap; } small { display: block; margin-top: .4rem; }
   </style>
@@ -17,29 +16,19 @@
 </head>
 <body>
   <h1>DocumentDB ecosystem compatibility</h1>
-  {% if preview %}
-  <p class="notice"><strong>Review prototype.</strong> This is a fork-hosted demo,
-     not an official compatibility support matrix. Issue reporting is not enabled
-     for this preview.</p>
-  {% endif %}
   <p>Results cover only the listed version pairs, runtime profiles, and executed scenarios.
      They do not certify every feature, deployment, or client API.</p>
   <p>Generated <time>{{ generated_at }}</time>.
      Machine-readable <a href="current.json">current results</a> and
      <a href="history.json">complete history</a>.</p>
-  {% for demonstration in [false, true] %}
-  <h2>{{ "Failure demonstrations" if demonstration else "Compatibility results" }}</h2>
-  {% if demonstration %}
-  <p class="notice">Synthetic assertion failures are diagnostic demonstrations.
-     They never change a real integration's compatibility status.</p>
-  {% endif %}
+  <h2>Compatibility results</h2>
   <table>
     <thead><tr><th>Integration</th><th>Versions and coverage</th><th>Status</th>
       <th>Last successful / attempted</th><th>Evidence</th></tr></thead>
     <tbody>
-    {% for row in rows if row.demonstration == demonstration %}
+    {% for row in rows %}
       <tr>
-        <td><a href="{{ row.repository }}">{{ row.integration }}</a><small>Review route: {{ row.owner }}</small></td>
+        <td><a href="{{ row.repository }}">{{ row.integration }}</a></td>
         <td>DocumentDB {{ row.documentdb_version }}<br>
           Upstream {{ row.upstream_version }}<small>{{ row.profile }}</small>
           <p>{{ row.passed }} / {{ row.expected }} scenarios passed in the displayed result.</p>
@@ -80,6 +69,5 @@
     {% endfor %}
     </tbody>
   </table>
-  {% endfor %}
 </body>
 </html>

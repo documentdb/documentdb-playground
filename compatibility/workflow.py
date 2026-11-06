@@ -59,14 +59,13 @@ def select_runs(
     integration: str,
     version: str | None,
     documentdb_version: str | None,
-    demonstration: bool = False,
     *,
     trigger: str = "manual",
 ) -> list[dict[str, Any]]:
     """Resolve each enabled integration's own default before expanding the matrix."""
     if trigger not in TRIGGERS:
         raise ValueError("Unknown execution trigger")
-    if trigger != "manual" and (integration != "all" or version or demonstration):
+    if trigger != "manual" and (integration != "all" or version):
         raise ValueError("Automatic runs select every enabled integration at its default version")
     if trigger == "scheduled" and documentdb_version != "all":
         raise ValueError("Scheduled runs select every reviewed DocumentDB release")
@@ -95,7 +94,6 @@ def select_runs(
                 "integration": name,
                 "version": selected,
                 "documentdb_version": release,
-                "demonstration": demonstration,
                 "trigger": trigger,
             }
             for release in releases
@@ -144,7 +142,7 @@ def collect_report(
             run["documentdb_version"],
             run["version"],
             spec["profile"],
-            run["demonstration"],
+            False,
         )
         expected[key] = None
         directory = incoming / integration / run["documentdb_version"]
@@ -163,7 +161,7 @@ def collect_report(
             append_result(store, result)
         except (OSError, ValueError, KeyError) as error:
             expected[key] = f"Result unavailable: {error}"
-    rows = render(store, output / "site", registry, preview=True, expected_runs=expected)
+    rows = render(store, output / "site", registry, expected_runs=expected)
     success = not errors and all(row["state"] == "Working" for row in rows)
     report = {
         "schema_version": 1,
@@ -183,8 +181,8 @@ def collect_report(
             else "One or more profiles or artifacts need attention."
         ),
         "",
-        "| Integration | DocumentDB | Upstream | Profile | Mode | Result | Passed | Diagnostic |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Integration | DocumentDB | Upstream | Profile | Result | Passed | Diagnostic |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in rows:
         cells = [
@@ -192,7 +190,6 @@ def collect_report(
             row["documentdb_version"],
             row["upstream_version"],
             row["profile"],
-            "Demonstration" if row["demonstration"] else "Compatibility",
             row["state"],
             f"{row['passed']}/{row['expected']}",
             row["error"] or "",
@@ -222,7 +219,6 @@ def main() -> int:
             "--documentdb-version",
             help="A reviewed registry release, or all; defaults to the newest",
         )
-        command.add_argument("--demonstration", action="store_true")
         command.add_argument("--trigger", choices=TRIGGERS, default="manual")
         if name == "report":
             command.add_argument("--input", type=Path, required=True)
@@ -241,7 +237,6 @@ def main() -> int:
             args.integration,
             args.version,
             args.documentdb_version,
-            args.demonstration,
             trigger=args.trigger,
         )
         if args.command == "matrix":

@@ -63,7 +63,6 @@ def render(
     registry: dict[str, Any],
     *,
     issue_repository: str = "documentdb/documentdb-playground",
-    preview: bool = False,
     now: datetime | None = None,
     expected_runs: dict[RunKey, str | None] | None = None,
 ) -> list[dict[str, Any]]:
@@ -72,10 +71,8 @@ def render(
     if store.is_symlink():
         raise ValueError("The result store must not be a symbolic link")
     results = [read_result(path) for path in sorted(store.glob("*.json"))]
+    results = [result for result in results if not result["demonstration"]]
     rows = dashboard_rows(results, registry, now, issue_repository, expected_runs=expected_runs)
-    if preview:
-        for row in rows:
-            row["issue_url"] = None
     site.mkdir(parents=True, exist_ok=True)
     environment = Environment(
         loader=FileSystemLoader(ROOT / "compatibility" / "dashboard"),
@@ -83,9 +80,7 @@ def render(
         undefined=StrictUndefined,
     )
     generated = now.isoformat()
-    page = environment.get_template("index.html").render(
-        rows=rows, generated_at=generated, preview=preview
-    )
+    page = environment.get_template("index.html").render(rows=rows, generated_at=generated)
     (site / "index.html").write_text(page)
     (site / "freshness.js").write_text(
         (ROOT / "compatibility" / "dashboard" / "freshness.js").read_text()
@@ -106,15 +101,14 @@ def main() -> int:
     parser.add_argument("--site", type=Path)
     parser.add_argument("--issue-repository", default="documentdb/documentdb-playground")
     parser.add_argument("--expected-run-url")
-    parser.add_argument(
-        "--preview", action="store_true", help="Label a demo site; hide issue links"
-    )
     args = parser.parse_args()
     if args.result is None and args.site is None:
         parser.error("Provide a result to append or a site to render")
     registry = read_registry()
     if args.result:
         result = read_result(args.result)
+        if result["demonstration"]:
+            parser.error("Failure demonstrations are not published")
         validate_incoming_result(result, registry, args.expected_run_url)
         append_result(args.store, result)
     if args.site:
@@ -123,7 +117,6 @@ def main() -> int:
             args.site,
             registry,
             issue_repository=args.issue_repository,
-            preview=args.preview,
         )
         print(f"Dashboard rendered at {args.site / 'index.html'}")
     return 0

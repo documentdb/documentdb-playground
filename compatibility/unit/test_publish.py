@@ -4,6 +4,7 @@
 """Immutable history, honest freshness, safe rendering, and issue-form links."""
 
 import json
+import sys
 from copy import deepcopy
 from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
@@ -11,8 +12,8 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 import yaml
 
-from compatibility.contracts import ROOT, timestamp
-from compatibility.publish import append_result, dashboard_rows, render
+from compatibility.contracts import DEMONSTRATION_TEST, ROOT, timestamp
+from compatibility.publish import append_result, dashboard_rows, main, render
 
 pytestmark = pytest.mark.unit
 
@@ -81,18 +82,29 @@ def test_empty_dashboard_does_not_claim_compatibility(tmp_path, registry):
     )
 
 
-def test_preview_is_labeled_and_does_not_offer_unprovisioned_issue_reporting(
-    tmp_path, record, registry
+def test_failure_demonstrations_are_not_published_or_rendered(
+    tmp_path, record, registry, monkeypatch
 ):
-    append_result(tmp_path / "data", record)
-    rows = render(tmp_path / "data", tmp_path / "site", registry, preview=True)
-    html = (tmp_path / "site" / "index.html").read_text()
-    current = json.loads((tmp_path / "site" / "current.json").read_text())
-    assert "Review prototype." in html and "not an official compatibility support matrix" in html
-    assert "Report a compatibility problem" not in html
-    assert all(row["issue_url"] is None for row in rows)
-    assert all(row["issue_url"] is None for row in current["integrations"])
-    assert row_for(rows, record)["state"] == "Working"
+    demonstration = deepcopy(record)
+    demonstration["id"] = "d" * 32
+    demonstration["demonstration"] = True
+    demonstration["expected_tests"].append(DEMONSTRATION_TEST)
+    demonstration["tests"].append(
+        {"id": DEMONSTRATION_TEST, "outcome": "failed", "message": "Deliberate mismatch"}
+    )
+    source = tmp_path / "demonstration.json"
+    source.write_text(json.dumps(demonstration))
+    store = tmp_path / "data"
+    monkeypatch.setattr(sys, "argv", ["publish", "--result", str(source), "--store", str(store)])
+    with pytest.raises(SystemExit, match="2"):
+        main()
+    assert not store.exists()
+    append_result(store, record)
+    append_result(store, demonstration)
+    rows = render(store, tmp_path / "site", registry)
+    assert not any(row["demonstration"] for row in rows)
+    assert json.loads((tmp_path / "site" / "history.json").read_text()) == [record]
+    assert DEMONSTRATION_TEST not in (tmp_path / "site" / "index.html").read_text()
 
 
 def test_old_failure_details_remain_visible_after_a_success(tmp_path, record, registry):

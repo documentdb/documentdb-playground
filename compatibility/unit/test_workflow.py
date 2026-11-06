@@ -35,7 +35,6 @@ def test_workflow_is_dispatched_or_scheduled_and_read_only(workflow):
         "integration",
         "version",
         "documentdb_version",
-        "demonstration",
         "trigger",
     } <= set(inputs)
     # The newest reviewed release comes from the registry rather than a workflow default.
@@ -70,13 +69,12 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(path):
 
 # These synthetic values exercise argument transport, not the reviewed release policy.
 @pytest.mark.parametrize(
-    ("version", "database", "demonstration", "trigger", "extra", "exit_code"),
+    ("version", "database", "trigger", "extra", "exit_code"),
     [
-        ("", "", "", "", [], 0),
+        ("", "", "", [], 0),
         (
             "",
             "0.999.0",
-            "false",
             "documentdb_release",
             ["--documentdb-version", "0.999.0", "--trigger", "documentdb_release"],
             0,
@@ -84,7 +82,6 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(path):
         (
             "",
             "all",
-            "",
             "scheduled",
             ["--documentdb-version", "all", "--trigger", "scheduled"],
             0,
@@ -92,14 +89,12 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(path):
         (
             "4.99.1",
             "0.999.0",
-            "true",
             "manual",
             [
                 "--documentdb-version",
                 "0.999.0",
                 "--version",
                 "4.99.1",
-                "--demonstration",
                 "--trigger",
                 "manual",
             ],
@@ -108,7 +103,6 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(path):
         (
             "4.99.0; echo unsafe",
             "0.999.0",
-            "false",
             "manual",
             [
                 "--documentdb-version",
@@ -123,7 +117,6 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(path):
         (
             "",
             "0.999.0; echo unsafe",
-            "false",
             "manual; echo unsafe",
             ["--documentdb-version", "0.999.0; echo unsafe", "--trigger", "manual; echo unsafe"],
             0,
@@ -139,7 +132,6 @@ def test_actual_workflow_script_handles_defaults_and_dispatch_inputs(
     tmp_path,
     version,
     database,
-    demonstration,
     trigger,
     extra,
     exit_code,
@@ -168,7 +160,6 @@ def test_actual_workflow_script_handles_defaults_and_dispatch_inputs(
             "VERSION": version,
             "INTEGRATION": integration,
             "DOCUMENTDB_VERSION": database,
-            "DEMONSTRATION": demonstration,
             "TRIGGER": trigger,
             "GITHUB_SERVER_URL": "https://github.com",
             "GITHUB_REPOSITORY": "example/project",
@@ -202,7 +193,6 @@ def test_actual_workflow_script_handles_defaults_and_dispatch_inputs(
             run_url,
             "--trigger",
             trigger,
-            *(["--demonstration"] if demonstration == "true" else []),
         ]
     else:
         expected = ["-m", "compatibility.workflow", "matrix" if job == "plan" else "report"]
@@ -242,7 +232,7 @@ def test_failed_runs_keep_their_evidence_and_fail_the_job(workflow):
     assert upload["if"] == "always()"
     assert upload["with"]["if-no-files-found"] == "error"
     assert upload["with"]["path"] == "results/"
-    for variable in ("integration", "version", "documentdb_version", "demonstration", "trigger"):
+    for variable in ("integration", "version", "documentdb_version", "trigger"):
         assert suite["env"][variable.upper()] == "${{ matrix." + variable + " }}"
 
 

@@ -110,25 +110,21 @@ Never share credentials or customer data.
 Runs emit runtime-neutral schema version 2. Schema-version-1 Python records remain
 readable without rewriting their immutable provenance.
 
-## Results and dashboard preview
+## Results and dashboard
 
-Append locally produced normal and demonstration records to an immutable store:
+Append locally produced records to an immutable store:
 
 ```bash
 python -m compatibility.publish \
   --result compatibility/.test-results/pymongo-001/result.json \
   --store compatibility/.test-results/history \
-  --site compatibility/.test-results/site --preview
-python -m compatibility.publish \
-  --result compatibility/.test-results/pymongo-demo-001/result.json \
-  --store compatibility/.test-results/history \
-  --site compatibility/.test-results/site --preview
+  --site compatibility/.test-results/site
 ```
 
 Open `compatibility/.test-results/site/index.html`. The same validated history
 produces HTML, `current.json`, and `history.json`. Conflicting run IDs are rejected;
-identical replays are idempotent. Demonstrations remain separate from normal
-compatibility evidence. Local runs have no fabricated pipeline URL.
+identical replays are idempotent. Failure demonstrations are rejected and never
+rendered. Local runs have no fabricated pipeline URL.
 
 | State | Meaning |
 | --- | --- |
@@ -141,8 +137,7 @@ If a newer attempt cannot execute, retain the previous conclusive result while
 exposing the new attempt's failure separately. Keep version pairs and profiles
 distinct. Browser-side freshness also ages previously rendered results.
 
-The `--preview` option labels review prototypes and hides public issue links.
-Without it, the renderer provides prefilled links to this repository's
+The renderer provides prefilled links to this repository's
 [compatibility issue form](../.github/ISSUE_TEMPLATE/compatibility-report.yml).
 Use `--issue-repository` to select a different reporting destination with the
 same form field IDs. A report should include the actual version pair,
@@ -163,7 +158,7 @@ integration defaults to `all`: a planning job expands every enabled registry ent
 using its own reviewed default version. Select one integration for a focused run
 or version override. A version override with `all`, a disabled integration, a
 version outside its registry policy, or an unknown database release is rejected
-before test jobs start. Keep the failure demonstration disabled for real results.
+before test jobs start.
 
 The workflow also runs daily on the default branch. Scheduled runs test every
 enabled integration at its default version against every reviewed DocumentDB
@@ -175,8 +170,7 @@ dispatches this workflow once for each added or re-pinned release, with every
 enabled integration at its default version and the `documentdb_release` trigger.
 If the earlier registry is unavailable, every reviewed release is dispatched. The
 `trigger` input defaults to `manual`; a `documentdb_release` run requires one
-reviewed release and cannot narrow integrations, override versions, or enable the
-failure demonstration.
+reviewed release and cannot narrow integrations or override versions.
 
 Each matrix job runs its complete scenario suite against its own disposable
 database. Matrix fail-fast is disabled. JSON and available JUnit/logs are retained
@@ -192,9 +186,9 @@ earlier attempt's pass. Compatibility failures remain **Failing**, and failed or
 incomplete reports exit nonzero without suppressing matrix failures.
 
 The `compatibility-report-<attempt>` artifact contains `summary.md`, machine-readable
-`summary.json`, accepted envelopes in `results/`, and a combined preview in `site/`.
-Only selected profiles and versions appear, including explicit overrides and
-labeled demonstrations. All artifacts have 30-day retention.
+`summary.json`, accepted envelopes in `results/`, and a combined dashboard in `site/`.
+Only selected profiles and versions appear, including explicit overrides. All
+artifacts have 30-day retention.
 
 Use **Re-run all jobs** for a complete matrix rerun. Reporting deliberately
 collects only the current attempt's artifacts, so rerunning only failed jobs can
@@ -223,7 +217,7 @@ python -m compatibility.workflow changed-releases --previous /path/to/previous-r
 ```
 
 Place each record under `incoming/<integration>/<documentdb-version>/result.json`.
-Use the same integration, version, database, demonstration, and trigger selection
+Use the same integration, version, database, and trigger selection
 as the producing runs, and a fresh output directory. `--expected-run-url` binds a
 combined report to one workflow attempt; omit it for local results. `--summary`
 appends the Markdown report to a GitHub step-summary file.
@@ -251,8 +245,8 @@ branch independently of artifact expiration.
 
 Keep write credentials separate from integration execution. A publisher must
 retain failed attempts and serialize deployment only after results are durably
-stored. Render complete history with `compatibility.publish`, using `--preview`
-for review prototypes. Deployment retries must not delete or rewrite history.
+stored. Render complete history with `compatibility.publish`. Deployment retries
+must not delete or rewrite history.
 Cancellation before persistence is not a compatibility verdict.
 
 Invoke this helper explicitly from the trusted publisher; the compatibility
