@@ -141,14 +141,12 @@ def test_git_ledger_retains_bounded_npm_inputs_and_rejects_oversized_replacement
         "main",
         "a" * 40,
         "https://github.com/example/project/actions/runs/42/attempts/1",
-        "unit-model",
     )
     release = {
         "id": 1,
         "tag_name": f"v{version}",
         "html_url": f"{spec['repository']}/releases/tag/v{version}",
         "published_at": "2026-10-01T00:00:00Z",
-        "body": "Release notes",
     }
     entry = watcher.candidate(
         "nodejs",

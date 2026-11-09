@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: MIT
 
-"""Exercise release discovery and interrupted dispatches without inference or GitHub writes."""
+"""Exercise release discovery and interrupted dispatches without GitHub writes."""
 
 import hashlib
 import json
@@ -43,7 +43,6 @@ def release(version, identifier=100, repository=PYTHON_UPSTREAM):
         "prerelease": False,
         "html_url": f"https://github.com/{repository}/releases/tag/{version}",
         "published_at": "2026-10-01T00:00:00Z",
-        "body": "Stable upstream release notes.",
     }
 
 
@@ -143,7 +142,6 @@ def context(monkeypatch):
         "main",
         "a" * 40,
         "https://github.com/example/project/actions/runs/42/attempts/1",
-        "unit-model",
     )
 
 
@@ -155,16 +153,9 @@ def ledger(registry, monkeypatch):
 
 
 def detect(ledger, registry, context):
-    selected = watcher.discover(ledger, registry, context)
-    assert len(selected) == 1
-    identifier = selected[0]["detection_id"]
-    return identifier, ledger.state["entries"][identifier]
-
-
-def assessment(identifier, **changes):
-    item = {"detection_id": identifier, "summary": "Upstream describes fixes.", "scenario_ids": []}
-    item.update(changes)
-    return {"items": [{"type": "assess_releases", "assessments": json.dumps([item])}]}
+    added = watcher.discover(ledger, registry, context)
+    assert len(added) == 1
+    return added[0], ledger.state["entries"][added[0]]
 
 
 @pytest.mark.parametrize("mutation", ["yanked", "runtime", "python", "source-only"])
@@ -233,10 +224,6 @@ def test_discovery_is_durable_idempotent_and_scoped_to_execution_identity(
     identifier, entry = detect(ledger, registry, context)
     assert entry == ledger.api.persisted["entries"][identifier]
     assert not ledger.api.dispatches
-    assert (
-        entry["release"]["notes_sha256"]
-        == hashlib.sha256(b"Stable upstream release notes.").hexdigest()
-    )
     watcher.discover(ledger, registry, context)
     assert list(ledger.state["entries"]) == [identifier]
     registry["integrations"]["pymongo"]["timeout_seconds"] += 1
@@ -245,47 +232,10 @@ def test_discovery_is_durable_idempotent_and_scoped_to_execution_identity(
     assert ledger.state["entries"][identifier] == entry
 
 
-def test_ai_context_is_bounded_and_cannot_choose_commands(ledger, registry, context):
-    identifier, _ = detect(ledger, registry, context)
-    scenarios = [registry["integrations"]["pymongo"]["expected_tests"][0]]
-    watcher.assess(ledger, registry, context, assessment(identifier, scenario_ids=scenarios))
-    saved = ledger.api.persisted["entries"][identifier]["analysis"]
-    assert saved["status"] == "complete" and saved["scenario_ids"] == scenarios
-    assert saved["model"] == context.model and saved["run_url"] == context.run_url
-    assert not ledger.api.dispatches
-
-
-@pytest.mark.parametrize(
-    "mutation", ["command", "unknown-id", "scenario", "text", "duplicate", "items"]
-)
-def test_untrusted_ai_output_cannot_change_pending_work(ledger, registry, context, mutation):
-    identifier, _ = detect(ledger, registry, context)
-    request = assessment(identifier)
-    item = json.loads(request["items"][0]["assessments"])[0]
-    if mutation == "command":
-        item["command"] = "echo unreviewed"
-    elif mutation == "unknown-id":
-        item["detection_id"] = "f" * 64
-    elif mutation == "scenario":
-        item["scenario_ids"] = ["test_undeclared_profile"]
-    elif mutation == "text":
-        item["summary"] = "\x00"
-    items = [item, item] if mutation == "duplicate" else [item]
-    request["items"][0]["assessments"] = json.dumps(items)
-    if mutation == "items":
-        request["items"] = [None]
-    prior = deepcopy(ledger.api.persisted)
-    with pytest.raises(ValueError):
-        watcher.assess(ledger, registry, context, request)
-    assert ledger.api.persisted == prior
-    assert not ledger.api.dispatches
-
-
-def test_ai_omission_does_not_discard_an_unambiguous_release(ledger, registry, context):
+def test_eligible_release_dispatches_its_complete_profile_once(ledger, registry, context):
     identifier, _ = detect(ledger, registry, context)
     assert watcher.dispatch(ledger, registry, context)
     saved = ledger.api.persisted["entries"][identifier]
-    assert saved["analysis"]["status"] == "unavailable"
     assert saved["status"] == "dispatched"
     assert ledger.api.dispatches[0]["inputs"] == {
         "integration": "pymongo",
@@ -431,7 +381,6 @@ def test_execution_guard_binds_the_exact_pending_profile(
     [
         (None, None),
         ("COMPATIBILITY_WATCHER_ENABLED", "false"),
-        ("COMPATIBILITY_WATCHER_MODEL", ""),
         ("GITHUB_REF", "refs/heads/unreviewed"),
         ("GITHUB_EVENT_NAME", "pull_request"),
         ("GITHUB_REPOSITORY", "example/other"),
@@ -447,7 +396,6 @@ def test_execution_context_requires_explicit_trusted_activation(
     )
     environment = {
         "COMPATIBILITY_WATCHER_ENABLED": "true",
-        "COMPATIBILITY_WATCHER_MODEL": "unit-model",
         "GITHUB_EVENT_PATH": str(event),
         "GITHUB_REPOSITORY": "example/project",
         "GITHUB_REF": "refs/heads/main",
@@ -466,14 +414,6 @@ def test_execution_context_requires_explicit_trusted_activation(
     else:
         with pytest.raises(ValueError):
             watcher.Context.environment()
-
-
-def test_a_stale_agent_run_cannot_replace_current_analysis(ledger, registry, context):
-    identifier, _ = detect(ledger, registry, context)
-    stale = replace(context, run_url=context.run_url.removesuffix("/1") + "/2")
-    with pytest.raises(ValueError, match="discovery run"):
-        watcher.assess(ledger, registry, stale, assessment(identifier))
-    assert ledger.api.persisted["entries"][identifier]["analysis"] is None
 
 
 def test_a_manually_resumed_unknown_dispatch_is_associated_without_another_request(
@@ -618,13 +558,11 @@ def test_discovery_gives_each_registered_integration_a_turn(
 
     monkeypatch.setattr(watcher, "package_metadata", package)
     monkeypatch.setattr(watcher, "prepare_npm_candidate", prepare)
-    selected = watcher.discover(ledger, registry, context)
-    assert {item["integration"] for item in selected} == set(registry["integrations"])
+    added = watcher.discover(ledger, registry, context)
+    assert {ledger.state["entries"][item]["integration"] for item in added} == set(
+        registry["integrations"]
+    )
     assert set(prepared) == {"nodejs", "mongoose"}
-    for item in selected:
-        assert (
-            item["scenario_ids"] == registry["integrations"][item["integration"]]["expected_tests"]
-        )
     assert watcher.dispatch(ledger, registry, context)
     assert len(ledger.api.dispatches) == watcher.MAX_DISPATCHES
     assert {request["inputs"]["integration"] for request in ledger.api.dispatches} == {

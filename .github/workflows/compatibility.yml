@@ -71,7 +71,6 @@ jobs:
           DISPATCH_ID: ${{ inputs.dispatch_id }}
           GITHUB_TOKEN: ${{ github.token }}
           COMPATIBILITY_WATCHER_ENABLED: ${{ vars.COMPATIBILITY_WATCHER_ENABLED }}
-          COMPATIBILITY_WATCHER_MODEL: ${{ vars.COMPATIBILITY_WATCHER_MODEL }}
         run: |
           args=()
           if [ -n "$INTEGRATION" ]; then args+=(--integration "$INTEGRATION"); fi

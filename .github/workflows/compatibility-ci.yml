@@ -8,14 +8,12 @@ on:
     paths:
       - "compatibility/**"
       - ".github/workflows/compatibility*"
-      - ".github/aw/actions-lock.json"
       - ".github/ISSUE_TEMPLATE/compatibility-report.yml"
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
     paths:
       - "compatibility/**"
       - ".github/workflows/compatibility*"
-      - ".github/aw/actions-lock.json"
       - ".github/ISSUE_TEMPLATE/compatibility-report.yml"
 
 concurrency:
@@ -49,20 +47,6 @@ jobs:
         run: shellcheck compatibility/persist.sh
       - name: Check the README dashboard publisher
         run: shellcheck compatibility/publish-readme.sh
-      - name: Check the compiled compatibility watcher
-        run: |
-          compiler="$RUNNER_TEMP/gh-aw"
-          curl --fail --location --silent --show-error --max-time 120 \
-            https://github.com/github/gh-aw/releases/download/v0.89.21/linux-amd64 \
-            --output "$compiler"
-          printf '%s  %s\n' \
-            1c74ff5fc28b1891d32b67f4348a9b7f750946b6d4a721e909187a848868016b \
-            "$compiler" | sha256sum --check --status
-          chmod +x "$compiler"
-          "$compiler" compile compatibility-watcher \
-            --action-mode release --strict --validate --no-check-update
-          git diff --exit-code -- .github/workflows/compatibility-watcher.lock.yml \
-            .github/aw/actions-lock.json
       - name: Check JavaScript reporting and dashboard freshness
         run: |
           image=$(sed -n 's/^FROM //p' compatibility/integrations/nodejs/Dockerfile)

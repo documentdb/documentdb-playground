@@ -20,6 +20,7 @@ from compatibility.contracts import ROOT, read_registry
 pytestmark = pytest.mark.unit
 WORKFLOW = ROOT / ".github/workflows/compatibility.yml"
 DISPATCHER = ROOT / ".github/workflows/compatibility-documentdb-release.yml"
+WATCHER = ROOT / ".github/workflows/compatibility-watcher.yml"
 
 
 @pytest.fixture
@@ -62,7 +63,7 @@ def test_workflow_is_dispatched_or_scheduled_and_read_only(workflow):
     assert {"all", *read_registry()["integrations"]} <= set(selector["options"])
 
 
-@pytest.mark.parametrize("path", [WORKFLOW, DISPATCHER])
+@pytest.mark.parametrize("path", [WORKFLOW, DISPATCHER, WATCHER])
 def test_actions_are_pinned_and_checkout_does_not_retain_credentials(path):
     workflow = yaml.safe_load(path.read_text())
     actions = [step for job in workflow["jobs"].values() for step in job["steps"] if "uses" in step]
@@ -482,27 +483,17 @@ def test_infrastructure_is_checked_without_starting_an_integration():
     assert "compatibility.runner" not in commands
 
 
-def test_compiled_watcher_limits_writes_and_keeps_dispatch_independent_of_ai_success():
-    compiled = yaml.safe_load(
-        (ROOT / ".github/workflows/compatibility-watcher.lock.yml").read_text()
-    )
-    assert set(compiled[True]) == {"schedule", "workflow_dispatch"}
-    jobs = compiled["jobs"]
-    assert compiled["permissions"] == {}
-    assert all("issues" not in job.get("permissions", {}) for job in jobs.values())
-    assert {
-        name for name, job in jobs.items() if job.get("permissions", {}).get("contents") == "write"
-    } == {"discover", "assess_releases", "dispatch"}
-    assert {
-        name for name, job in jobs.items() if job.get("permissions", {}).get("actions") == "write"
-    } == {"dispatch"}
-    assert jobs["agent"]["permissions"]["contents"] == "read"
-    guard = jobs["activation"]["if"]
-    assert "COMPATIBILITY_WATCHER_ENABLED == 'true'" in guard
-    assert "COMPATIBILITY_WATCHER_MODEL != ''" in guard
+def test_watcher_is_opt_in_and_only_dispatch_can_start_workflows():
+    watcher = yaml.safe_load(WATCHER.read_text())
+    assert set(watcher[True]) == {"schedule", "workflow_dispatch"}
+    assert watcher["permissions"] == {}
+    jobs = watcher["jobs"]
+    assert {name: job["permissions"] for name, job in jobs.items()} == {
+        "discover": {"contents": "write"},
+        "dispatch": {"contents": "write", "actions": "write"},
+    }
+    guard = jobs["discover"]["if"]
+    assert "vars.COMPATIBILITY_WATCHER_ENABLED == 'true'" in guard
     assert "github.event.repository.default_branch" in guard
-    dispatch = jobs["dispatch"]
-    assert set(dispatch["needs"]) == {"discover", "agent", "assess_releases"}
-    assert "!cancelled()" in dispatch["if"]
-    assert "needs.discover.result == 'success'" in dispatch["if"]
-    assert "needs.agent.result" not in dispatch["if"]
+    assert jobs["dispatch"]["needs"] == "discover"
+    assert "secrets." not in WATCHER.read_text()

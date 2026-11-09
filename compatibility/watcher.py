@@ -1,12 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: MIT
 
-"""Discover bounded registry releases, retain AI context, and dispatch frozen profiles."""
+"""Discover bounded registry releases and dispatch their frozen compatibility profiles."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -56,7 +55,6 @@ MAX_DISPATCHES = 3
 MAX_ATTEMPTS = 3
 MAX_UPSTREAMS = 10
 MAX_RELEASES = 30
-PROMPT = ROOT / ".github/workflows/compatibility-watcher.md"
 IDENTITY_FIELDS = (
     "integration",
     "version",
@@ -84,7 +82,6 @@ class Context:
     branch: str
     source_sha: str
     run_url: str
-    model: str
 
     @classmethod
     def environment(cls) -> Context:
@@ -93,7 +90,6 @@ class Context:
         event = read_json_file(Path(os.environ["GITHUB_EVENT_PATH"]))
         repository = os.environ["GITHUB_REPOSITORY"]
         branch = event["repository"]["default_branch"]
-        model = os.environ.get("COMPATIBILITY_WATCHER_MODEL", "")
         revision = os.environ["GITHUB_SHA"]
         run_id = os.environ["GITHUB_RUN_ID"]
         attempt = os.environ["GITHUB_RUN_ATTEMPT"]
@@ -104,20 +100,16 @@ class Context:
             or not isinstance(branch, str)
             or os.environ.get("GITHUB_REF") != f"refs/heads/{branch}"
             or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
-            or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", model)
             or not re.fullmatch(r"[a-f0-9]{40}", revision)
             or not re.fullmatch(r"[1-9][0-9]*", run_id)
             or not re.fullmatch(r"[1-9][0-9]*", attempt)
         ):
-            raise ValueError(
-                "Watcher execution requires a configured model and trusted default-branch context"
-            )
+            raise ValueError("Watcher execution requires a trusted default-branch context")
         return cls(
             repository,
             branch,
             revision,
             f"https://github.com/{repository}/actions/runs/{run_id}/attempts/{attempt}",
-            model,
         )
 
 
@@ -336,9 +328,6 @@ def candidate(
     bundle: dict[str, Any] | None,
 ) -> dict[str, Any]:
     spec = registry["integrations"][integration]
-    notes = release.get("body") or ""
-    if not isinstance(notes, str):
-        raise ValueError("Release notes must be text")
     entry = {
         "integration": integration,
         "version": version,
@@ -352,8 +341,6 @@ def candidate(
             "tag": release["tag_name"],
             "url": release["html_url"],
             "published_at": release["published_at"],
-            "notes": notes[:2000],
-            "notes_sha256": hashlib.sha256(notes.encode()).hexdigest(),
         },
         "metadata_sha256": json_digest(metadata),
         "detected_at": now().isoformat(),
@@ -361,8 +348,6 @@ def candidate(
         "detected_by": context.run_url,
         "status": "pending",
         "attempts": [],
-        "review_run_url": context.run_url,
-        "analysis": None,
         "error": None,
     }
     if bundle is not None:
@@ -370,7 +355,8 @@ def candidate(
     return entry
 
 
-def discover(ledger: GitLedger, registry: dict[str, Any], context: Context) -> list[dict[str, Any]]:
+def discover(ledger: GitLedger, registry: dict[str, Any], context: Context) -> list[str]:
+    """Durably record new eligible version pairs and return their detection IDs."""
     specs = watched_specs(registry)
     observations: list[dict[str, str]] = []
     ledger.state["last_scan"] = {
@@ -388,7 +374,7 @@ def discover(ledger: GitLedger, registry: dict[str, Any], context: Context) -> l
             if not isinstance(releases, list) or len(releases) > MAX_RELEASES:
                 raise ValueError("Upstream release feed exceeded its reviewed bound")
             feeds[integration] = releases
-        added = 0
+        added: list[str] = []
         for index in range(MAX_RELEASES):
             for integration, spec in specs.items():
                 if index >= len(feeds[integration]):
@@ -438,103 +424,19 @@ def discover(ledger: GitLedger, registry: dict[str, Any], context: Context) -> l
                     observation["decision"] = "eligible"
                     if identifier not in ledger.state["entries"]:
                         ledger.state["entries"][identifier] = entry
-                        added += 1
-                    if added >= MAX_DISPATCHES:
+                        added.append(identifier)
+                    if len(added) >= MAX_DISPATCHES:
                         break
-                if added >= MAX_DISPATCHES:
+                if len(added) >= MAX_DISPATCHES:
                     break
-            if added >= MAX_DISPATCHES:
+            if len(added) >= MAX_DISPATCHES:
                 break
     except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
         ledger.state["last_scan"]["error"] = str(error)[:500]
         ledger.save()
         raise
-    selected = []
-    for identifier, entry in sorted(ledger.state["entries"].items()):
-        if (
-            entry["status"] == "pending"
-            and entry["analysis"] is None
-            and current_identity(entry, registry)
-        ):
-            entry["review_run_url"] = context.run_url
-            selected.append(
-                {
-                    "detection_id": identifier,
-                    "integration": entry["integration"],
-                    "version": entry["version"],
-                    "release": entry["release"],
-                    "scenario_ids": specs[entry["integration"]]["expected_tests"],
-                }
-            )
-            if len(selected) == MAX_DISPATCHES:
-                break
     ledger.save()
-    return selected
-
-
-def analysis_record(
-    context: Context, summary: str, scenarios: list[str], status: str
-) -> dict[str, Any]:
-    return {
-        "status": status,
-        "model": context.model,
-        "run_url": context.run_url,
-        "prompt_sha256": hashlib.sha256(PROMPT.read_bytes()).hexdigest(),
-        "summary": summary,
-        "scenario_ids": scenarios,
-    }
-
-
-def assess(ledger: GitLedger, registry: dict[str, Any], context: Context, output: Any) -> None:
-    if (
-        not isinstance(output, dict)
-        or not isinstance(output.get("items"), list)
-        or len(output["items"]) > 10
-        or any(not isinstance(item, dict) for item in output["items"])
-    ):
-        raise ValueError("AI output is not a safe-output envelope")
-    requests = [item for item in output["items"] if item.get("type") == "assess_releases"]
-    if len(requests) != 1 or not isinstance(requests[0].get("assessments"), str):
-        raise ValueError("Exactly one structured release-assessment request is required")
-    assessments = json.loads(requests[0]["assessments"])
-    if not isinstance(assessments, list) or not 1 <= len(assessments) <= MAX_DISPATCHES:
-        raise ValueError("AI assessment count is outside the reviewed limit")
-    seen = set()
-    prepared = {}
-    for item in assessments:
-        if not isinstance(item, dict) or set(item) != {"detection_id", "summary", "scenario_ids"}:
-            raise ValueError(
-                "AI assessments may contain only identities, summaries, and scenario IDs"
-            )
-        identifier = item["detection_id"]
-        if not isinstance(identifier, str) or identifier in seen:
-            raise ValueError("AI assessment contains a duplicate or malformed detection ID")
-        seen.add(identifier)
-        entry = ledger.state["entries"].get(identifier)
-        if (
-            entry is None
-            or entry["status"] != "pending"
-            or entry["review_run_url"] != context.run_url
-        ):
-            raise ValueError("AI assessment does not belong to this discovery run")
-        summary = item["summary"]
-        scenarios = item["scenario_ids"]
-        if (
-            not isinstance(summary, str)
-            or not 1 <= len(summary) <= 1000
-            or re.search(r"[\x00-\x08\x0b-\x1f]", summary)
-            or not isinstance(scenarios, list)
-            or any(not isinstance(name, str) for name in scenarios)
-            or len(scenarios) != len(set(scenarios))
-            or not set(scenarios).issubset(
-                registry["integrations"][entry["integration"]]["expected_tests"]
-            )
-        ):
-            raise ValueError("AI assessment has invalid text or invents unreviewed scenarios")
-        prepared[identifier] = analysis_record(context, summary, scenarios, "complete")
-    for identifier, analysis in prepared.items():
-        ledger.state["entries"][identifier]["analysis"] = analysis
-    ledger.save()
+    return added
 
 
 def current_identity(entry: dict[str, Any], registry: dict[str, Any]) -> bool:
@@ -697,15 +599,6 @@ def dispatch(ledger: GitLedger, registry: dict[str, Any], context: Context) -> b
             entry.update(status="blocked", error="Automatic dispatch retry limit reached")
             ledger.save()
             continue
-        if entry["analysis"] is None:
-            entry["analysis"] = analysis_record(
-                context,
-                "AI assessment unavailable; deterministic release eligibility "
-                "selected the complete profile",
-                [],
-                "unavailable",
-            )
-            print(f"::warning::AI assessment unavailable for detection {identifier}")
         attempt: dict[str, Any] = {
             "id": uuid.uuid4().hex,
             "watcher_run_url": context.run_url,
@@ -820,9 +713,7 @@ def validate_dispatch(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("discover", "assess", "dispatch"))
-    parser.add_argument("--github-output", type=Path)
-    parser.add_argument("--agent-output", type=Path)
+    parser.add_argument("command", choices=("discover", "dispatch"))
     args = parser.parse_args()
     try:
         context = Context.environment()
@@ -834,17 +725,8 @@ def main() -> int:
                 "Watcher ledger identities do not match their recorded execution inputs"
             )
         if args.command == "discover":
-            selected = discover(ledger, registry, context)
-            if args.github_output is not None:
-                with args.github_output.open("a") as output:
-                    output.write("candidates=" + json.dumps(selected, separators=(",", ":")) + "\n")
-                    output.write(f"has_candidates={str(bool(selected)).lower()}\n")
-            print(f"Persisted discovery; {len(selected)} releases require AI context")
-        elif args.command == "assess":
-            if args.agent_output is None:
-                raise ValueError("The safe-output artifact is required for AI assessments")
-            assess(ledger, registry, context, read_json_file(args.agent_output))
-            print("Validated AI assessments were retained in the watcher ledger")
+            added = discover(ledger, registry, context)
+            print(f"Persisted discovery; recorded {len(added)} new eligible releases")
         elif not dispatch(ledger, registry, context):
             return 1
         validate_schema(ledger.state, "watcher")

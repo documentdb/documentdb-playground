@@ -289,21 +289,16 @@ select `upstream_release` with `--detection-id` and `--dispatch-id` instead of
 
 ## Opt-in upstream release watcher
 
-The reviewed source is
-[compatibility-watcher.md](../.github/workflows/compatibility-watcher.md).
-Its generated `.lock.yml` runs GitHub Agentic Workflows with the Copilot engine.
-It is disabled unless both repository or organization variables are configured:
+[compatibility-watcher.yml](../.github/workflows/compatibility-watcher.yml)
+discovers eligible upstream releases and dispatches their complete profiles.
+It is disabled unless the `COMPATIBILITY_WATCHER_ENABLED` repository or
+organization variable is the literal string `true`.
 
-| Variable | Required value |
-| --- | --- |
-| `COMPATIBILITY_WATCHER_ENABLED` | The literal string `true` |
-| `COMPATIBILITY_WATCHER_MODEL` | An organization-approved Copilot model ID |
-
-Before enabling it, maintainers must approve the model and organization Copilot
-authentication, including the `copilot-requests: write` permission, Actions
-budgets, and the dedicated state branch. No PAT or new secret is required by
-the authored workflow. It does not configure subscriptions, credentials,
-variables, branch rules, or hosting.
+Before enabling it, maintainers must allow the workflow's GitHub token to write
+the dedicated state branch and dispatch workflows. No PAT or new secret is
+required. The workflow does not configure credentials, variables, branch rules,
+or hosting. Its `discover` job holds only `contents: write`; only the `dispatch`
+job also receives `actions: write`.
 
 The watcher and compatibility workflows must exist on the default branch. The watcher
 accepts only scheduled or manual execution on that branch. It runs daily at
@@ -353,17 +348,7 @@ includes the upstream artifacts and hashes, DocumentDB image and version,
 profile, execution-input digest, source revision, release evidence, and discovery
 run. The key covers the execution identity, not just the latest version string.
 
-The read-only AI agent receives at most three bounded public release excerpts
-and known scenario IDs. It provides an advisory summary and optional scenario
-references, not commands, eligibility decisions, or compatibility verdicts.
-It cannot reduce coverage. Its assessment retains the model, prompt hash, and
-run URL. The release-analysis agent has a four-turn, ten-minute inference limit;
-framework validation has separate bounded jobs. These limits are not a monetary
-budget.
-
-The trusted dispatcher runs the complete affected profile even if AI analysis
-fails or omits a release. Missing analysis is explicitly marked `unavailable`,
-with a warning; failed AI jobs are not turned green. Before dispatch, the code
+Every dispatch runs the complete affected profile. Before dispatch, the code
 revalidates the reviewed execution inputs and official release artifacts.
 An unexpected downloaded artifact is rejected before Docker build or execution.
 Only the planning step reads watcher state. It passes the validated bundle and
@@ -371,13 +356,13 @@ its hash as bounded matrix data, not executable instructions. The runner checks
 that identity before downloading archives or building a client and installs the
 frozen dependency tree offline. Results retain the bundle and hash alongside the
 actual installed dependencies; report collection checks the planned hash.
-No GitHub or inference token is passed to the isolated test client.
+No GitHub token is passed to the isolated test client.
 
 Normal default-branch upstream runs use the same combined reports and README
 publisher as manual and scheduled runs. Verified candidate results, including compatibility
 failures and incomplete attempts, can therefore update the existing badges
-without changing the default package versions. Merely discovering a release,
-resolving its dependencies, or receiving an AI assessment cannot make a badge green.
+without changing the default package versions. Discovering a release or
+resolving its dependencies cannot make a badge green.
 
 ### State, retries, and recovery
 
@@ -417,9 +402,9 @@ use a new discovery rather than overriding the identity checks. An ordinary
 manual run with both IDs blank remains available independently of the watcher.
 
 Inspect compatibility artifacts and use the reporting guidance above for
-conclusive scenario failures. `completed`, successful dispatch, or AI analysis
-does not establish Working. Watcher failures remain visible as failed Actions
-jobs and ledger errors; automatic issue creation is disabled in the workflow.
+conclusive scenario failures. `completed` or a successful dispatch does not
+establish Working. Watcher failures remain visible as failed Actions jobs and
+ledger errors; the watcher does not create issues.
 
 The ledger is bounded to 1,000 entries and 2 MiB. Exhaustion stops new writes
 and requires a reviewed retention strategy preserving the audit and deduplication
@@ -438,24 +423,8 @@ an adapter for either runtime requires its registered official package/repositor
 complete scenario contract, and an explicit `watch_version_pattern`; the reviewed
 manual manifest and lockfile remain the default for npm profiles.
 
-### Regenerate the watcher
-
-Use the pinned `gh-aw` **v0.89.21** compiler and release action mode. The
-infrastructure workflow downloads its Linux x64 binary, verifies its SHA-256,
-validates the workflow, and rejects generated-file drift. Make authored changes
-in the Markdown file, then compile with that same binary:
-
-```bash
-gh-aw compile compatibility-watcher \
-  --action-mode release --strict --validate --no-check-update
-```
-
-Commit the Markdown, generated lock workflow, and `.github/aw/actions-lock.json`
-together. Do not hand-edit the generated YAML. The pinned compiler's schema
-validation understands the Copilot permission and queued-concurrency fields;
-older standalone Actions linters may not. Local unit tests simulate inference,
-GitHub receipts, interruptions, and real Git conflicts without production
-dispatches or live inference.
+Local unit tests simulate GitHub receipts, interruptions, and real Git conflicts
+without production dispatches.
 
 ## Durable Git history
 
