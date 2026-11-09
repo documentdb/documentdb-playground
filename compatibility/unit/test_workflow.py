@@ -3,6 +3,7 @@
 
 """Keep dispatched and scheduled runs read-only without turning failures into green jobs."""
 
+import json
 import os
 import re
 import subprocess
@@ -48,7 +49,13 @@ def test_workflow_is_dispatched_or_scheduled_and_read_only(workflow):
         for job in workflow["jobs"].values()
     )
     assert "secrets." not in WORKFLOW.read_text()
-    assert "github.token" not in WORKFLOW.read_text()
+    token_steps = [
+        (name, step)
+        for name, job in workflow["jobs"].items()
+        for step in job["steps"]
+        if "${{ github.token }}" in step.get("env", {}).values()
+    ]
+    assert [(name, step.get("id")) for name, step in token_steps] == [("plan", "select")]
     assert workflow["name"] == "Ecosystem compatibility"
     selector = workflow[True]["workflow_dispatch"]["inputs"]["integration"]
     assert selector["default"] == "all"
@@ -69,15 +76,16 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(path):
 
 # These synthetic values exercise argument transport, not the reviewed release policy.
 @pytest.mark.parametrize(
-    ("version", "database", "trigger", "extra", "exit_code"),
+    ("version", "database", "trigger", "extra", "exit_code", "watcher"),
     [
-        ("", "", "", [], 0),
+        ("", "", "", [], 0, False),
         (
             "",
             "0.999.0",
             "documentdb_release",
             ["--documentdb-version", "0.999.0", "--trigger", "documentdb_release"],
             0,
+            False,
         ),
         (
             "",
@@ -85,6 +93,7 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(path):
             "scheduled",
             ["--documentdb-version", "all", "--trigger", "scheduled"],
             0,
+            False,
         ),
         (
             "4.99.1",
@@ -99,6 +108,7 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(path):
                 "manual",
             ],
             1,
+            False,
         ),
         (
             "4.99.0; echo unsafe",
@@ -113,6 +123,7 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(path):
                 "manual",
             ],
             0,
+            False,
         ),
         (
             "",
@@ -120,6 +131,15 @@ def test_actions_are_pinned_and_checkout_does_not_retain_credentials(path):
             "manual; echo unsafe",
             ["--documentdb-version", "0.999.0; echo unsafe", "--trigger", "manual; echo unsafe"],
             0,
+            False,
+        ),
+        (
+            "4.99.2",
+            "0.999.0",
+            "manual",
+            ["--documentdb-version", "0.999.0", "--version", "4.99.2", "--trigger", "manual"],
+            0,
+            True,
         ),
     ],
 )
@@ -135,6 +155,7 @@ def test_actual_workflow_script_handles_defaults_and_dispatch_inputs(
     trigger,
     extra,
     exit_code,
+    watcher,
     integration,
     job,
 ):
@@ -149,6 +170,9 @@ def test_actual_workflow_script_handles_defaults_and_dispatch_inputs(
         """if [ "$3" = "matrix" ]; then printf '%s\\n' '{"include":[]}'; fi; """
         'return "$TEST_EXIT_CODE"; }\n'
     )
+    if watcher and job == "test":
+        # The planned matrix, not the dispatch input, carries the watcher trigger.
+        trigger = "upstream_release"
     captured = tmp_path / "arguments"
     output = tmp_path / "job-output"
     summary = tmp_path / "summary"
@@ -161,6 +185,11 @@ def test_actual_workflow_script_handles_defaults_and_dispatch_inputs(
             "INTEGRATION": integration,
             "DOCUMENTDB_VERSION": database,
             "TRIGGER": trigger,
+            "DETECTION_ID": "a" * 64 if watcher else "",
+            "DISPATCH_ID": "b" * 32 if watcher else "",
+            "EXPECTED_ARTIFACTS": ",".join(["c" * 64, "d" * 64]) if watcher else "",
+            "NPM_BUNDLE": "",
+            "EXPECTED_NPM_BUNDLE_SHA256": "",
             "GITHUB_SERVER_URL": "https://github.com",
             "GITHUB_REPOSITORY": "example/project",
             "GITHUB_RUN_ID": "42",
@@ -208,6 +237,18 @@ def test_actual_workflow_script_handles_defaults_and_dispatch_inputs(
                 run_url,
             ]
         expected += [*(["--integration", integration] if integration else []), *extra]
+    if watcher:
+        if job == "test":
+            expected += [
+                "--detection-id",
+                "a" * 64,
+                "--expected-artifact-sha256",
+                "c" * 64,
+                "--expected-artifact-sha256",
+                "d" * 64,
+            ]
+        else:
+            expected += ["--detection-id", "a" * 64, "--dispatch-id", "b" * 32]
     assert captured.read_bytes().decode().split("\0")[:-1] == expected
     if job == "plan":
         if exit_code:
@@ -236,6 +277,48 @@ def test_failed_runs_keep_their_evidence_and_fail_the_job(workflow):
         assert suite["env"][variable.upper()] == "${{ matrix." + variable + " }}"
 
 
+def test_candidate_bundle_is_passed_as_data_without_shell_interpretation(workflow, tmp_path):
+    suite = next(step for step in workflow["jobs"]["test"]["steps"] if step.get("id") == "suite")
+    bundle = json.dumps({"lockfile": {"description": "$(touch unexpected) `touch unexpected`"}})
+    captured = tmp_path / "arguments"
+    capture = 'python() { printf "%s\\0" "$@" > "$CAPTURED_ARGUMENTS"; }\n'
+    environment = {
+        **os.environ,
+        "INTEGRATION": "nodejs",
+        "VERSION": "7.99.0",
+        "DOCUMENTDB_VERSION": "0.117.0",
+        "TRIGGER": "upstream_release",
+        "DETECTION_ID": "a" * 64,
+        "EXPECTED_ARTIFACTS": "b" * 64,
+        "NPM_BUNDLE": bundle,
+        "EXPECTED_NPM_BUNDLE_SHA256": "c" * 64,
+        "RUNNER_TEMP": str(tmp_path),
+        "CAPTURED_ARGUMENTS": str(captured),
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_REPOSITORY": "example/project",
+        "GITHUB_RUN_ID": "42",
+        "GITHUB_RUN_ATTEMPT": "1",
+    }
+    process = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", capture + suite["run"]],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert process.returncode == 0, process.stderr
+    retained = tmp_path / "compatibility-npm-candidate.json"
+    assert retained.read_text() == bundle and not (tmp_path / "unexpected").exists()
+    arguments = captured.read_bytes().decode().split("\0")[:-1]
+    assert arguments[-4:] == [
+        "--npm-bundle",
+        str(retained),
+        "--expected-npm-bundle-sha256",
+        "c" * 64,
+    ]
+
+
 def test_plan_and_report_resolve_the_same_selection(workflow):
     plan, report = (
         next(
@@ -245,7 +328,17 @@ def test_plan_and_report_resolve_the_same_selection(workflow):
         )
         for job in ("plan", "report")
     )
-    assert plan["env"] == report["env"]
+    selection = (
+        "INTEGRATION",
+        "VERSION",
+        "DOCUMENTDB_VERSION",
+        "TRIGGER",
+        "DETECTION_ID",
+        "DISPATCH_ID",
+    )
+    assert {name: plan["env"][name] for name in selection} == {
+        name: report["env"][name] for name in selection
+    }
     assert "github.event_name == 'schedule' && 'all'" in plan["env"]["DOCUMENTDB_VERSION"]
     assert "github.event_name == 'schedule' && 'scheduled'" in plan["env"]["TRIGGER"]
 
@@ -387,3 +480,29 @@ def test_infrastructure_is_checked_without_starting_an_integration():
     assert "test_freshness.cjs" in commands
     assert "test_nodejs.cjs" in commands
     assert "compatibility.runner" not in commands
+
+
+def test_compiled_watcher_limits_writes_and_keeps_dispatch_independent_of_ai_success():
+    compiled = yaml.safe_load(
+        (ROOT / ".github/workflows/compatibility-watcher.lock.yml").read_text()
+    )
+    assert set(compiled[True]) == {"schedule", "workflow_dispatch"}
+    jobs = compiled["jobs"]
+    assert compiled["permissions"] == {}
+    assert all("issues" not in job.get("permissions", {}) for job in jobs.values())
+    assert {
+        name for name, job in jobs.items() if job.get("permissions", {}).get("contents") == "write"
+    } == {"discover", "assess_releases", "dispatch"}
+    assert {
+        name for name, job in jobs.items() if job.get("permissions", {}).get("actions") == "write"
+    } == {"dispatch"}
+    assert jobs["agent"]["permissions"]["contents"] == "read"
+    guard = jobs["activation"]["if"]
+    assert "COMPATIBILITY_WATCHER_ENABLED == 'true'" in guard
+    assert "COMPATIBILITY_WATCHER_MODEL != ''" in guard
+    assert "github.event.repository.default_branch" in guard
+    dispatch = jobs["dispatch"]
+    assert set(dispatch["needs"]) == {"discover", "agent", "assess_releases"}
+    assert "!cancelled()" in dispatch["if"]
+    assert "needs.discover.result == 'success'" in dispatch["if"]
+    assert "needs.agent.result" not in dispatch["if"]

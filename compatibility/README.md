@@ -7,7 +7,8 @@ shared; each integration adapter implements its own scenario suite.
 The GitHub Actions workflow runs on demand, daily, and for newly reviewed
 DocumentDB releases. It selects enabled profiles and combines validated results as
 Markdown, HTML, and JSON. A trusted publisher can append results to Git history
-with the persistence helper.
+with the persistence helper. An opt-in release watcher requests compatibility
+runs for upstream artifacts that pass its eligibility checks.
 
 ## Profiles and reviewed artifacts
 
@@ -40,14 +41,17 @@ packages disabled. The client verifies installed dependency versions and records
 their SHA-256 hashes. Shared JavaScript execution and reporting live in
 `compatibility/client.cjs` and `compatibility/report.cjs`, separate from adapters.
 
-The Node.js and Mongoose profiles accept only their reviewed locked versions.
-To select another, update the manifest in `compatibility/integrations/nodejs` or
+Manual Node.js and Mongoose runs accept only their reviewed locked versions.
+To change a manual baseline, update the manifest in `compatibility/integrations/nodejs` or
 `compatibility/integrations/mongoose`, regenerate that adapter's lockfile using Node 24 and
 `npm install --package-lock-only --ignore-scripts --engine-strict --omit=optional`,
 and update the registry default and version policy. Review dependency changes and
 rerun both the normal and demonstration profiles.
 Mongoose's transitive MongoDB driver is independently locked and recorded as a
 dependency, never substituted for the Mongoose package version.
+Authorized upstream runs instead use a frozen candidate manifest and lockfile
+recorded by the watcher. They do not modify the checked-in baselines or broaden
+manual version overrides.
 
 ## Coverage
 
@@ -232,8 +236,9 @@ reviewed release and cannot narrow integrations or override versions.
 Each matrix job runs its complete scenario suite against its own disposable
 database. Matrix fail-fast is disabled. JSON and available JUnit/logs are retained
 in `compatibility-results-<integration>-<documentdb-version>-<attempt>` artifacts
-even when the job fails. Results record the trigger (`manual`, `scheduled`, or
-`documentdb_release`) and exact workflow-attempt URL.
+even when the job fails. Results record the trigger (`manual`, `scheduled`,
+`documentdb_release`, or the watcher's `upstream_release`) and exact
+workflow-attempt URL.
 
 After the matrix finishes, reporting validates each selected result's identity,
 trigger, coverage, artifacts, suite digest, and workflow-attempt URL. The summary
@@ -278,6 +283,179 @@ Use the same integration, version, database, and trigger selection
 as the producing runs, and a fresh output directory. `--expected-run-url` binds a
 combined report to one workflow attempt; omit it for local results. `--summary`
 appends the Markdown report to a GitHub step-summary file.
+The Markdown summary labels each result's trigger. Upstream-triggered reports
+select `upstream_release` with `--detection-id` and `--dispatch-id` instead of
+`--trigger`, and carry the detection ID through JSON and the dashboard.
+
+## Opt-in upstream release watcher
+
+The reviewed source is
+[compatibility-watcher.md](../.github/workflows/compatibility-watcher.md).
+Its generated `.lock.yml` runs GitHub Agentic Workflows with the Copilot engine.
+It is disabled unless both repository or organization variables are configured:
+
+| Variable | Required value |
+| --- | --- |
+| `COMPATIBILITY_WATCHER_ENABLED` | The literal string `true` |
+| `COMPATIBILITY_WATCHER_MODEL` | An organization-approved Copilot model ID |
+
+Before enabling it, maintainers must approve the model and organization Copilot
+authentication, including the `copilot-requests: write` permission, Actions
+budgets, and the dedicated state branch. No PAT or new secret is required by
+the authored workflow. It does not configure subscriptions, credentials,
+variables, branch rules, or hosting.
+
+The watcher and compatibility workflows must exist on the default branch. The watcher
+accepts only scheduled or manual execution on that branch. It runs daily at
+08:23 UTC and can also be started with **Run workflow**. Its invocations are
+serialized. Disable the enablement variable to stop future work, and explicitly
+cancel an in-flight run when immediate suspension is needed.
+
+Release discovery uses each enabled registry entry with a `watch_version_pattern`.
+That optional field opts a profile into discovery and defines its automatic version
+range independently of the manual `version_pattern`. The checked-in policies admit
+stable releases at least as new as each baseline within its current major version.
+Prereleases and new majors are not selected automatically.
+
+The watcher reads at most 30 releases from each registered upstream GitHub
+repository, for at most ten watched integrations. It examines those feeds in
+round-robin order rather than draining one integration's release backlog first.
+GitHub release identities must match the registered repository.
+Package names, versions, and artifacts are checked against the corresponding
+official package registry. Unpublished metadata is recorded and reconsidered
+on later scans.
+
+Python discovery requires eligible non-yanked wheels from PyPI.
+The wheel tags match the runner's Python 3.12 Linux x64 download policy.
+`Requires-Python` must admit **3.12.0**, a conservative floor: a release requiring
+a newer 3.12 patch is not automatically selected even if a particular image
+could run it.
+
+For npm, the package's registry repository must match the registered upstream,
+and deprecated releases are excluded. A disposable container using the profile's
+digest-pinned Node image resolves the exact candidate with lifecycle scripts,
+optional installation, auditing, and funding requests disabled. Engine requirements
+are enforced. The resolver has no credentials, checkout mount, or Docker socket;
+only its temporary filesystem is writable. Resolution failures stop discovery
+with an explicit ledger error, not an invented compatibility verdict.
+
+The resulting manifest, lockfile, and resolver image form a bundle capped at
+64 KiB and 100 locked dependencies. Every non-optional archive must pass the
+existing registry-origin and SHA-512 verification before the candidate is recorded.
+The locked root archive must also match the independently fetched release metadata.
+The complete bundle is stored in the Git-backed ledger, and its SHA-256 contributes
+to the detection identity. Rediscovery and retries reuse that bundle instead of
+resolving a newer transitive dependency tree. Changed execution inputs or published
+root artifacts require a new detection.
+
+At most three new version pairs are recorded per invocation. Each detection
+includes the upstream artifacts and hashes, DocumentDB image and version,
+profile, execution-input digest, source revision, release evidence, and discovery
+run. The key covers the execution identity, not just the latest version string.
+
+The read-only AI agent receives at most three bounded public release excerpts
+and known scenario IDs. It provides an advisory summary and optional scenario
+references, not commands, eligibility decisions, or compatibility verdicts.
+It cannot reduce coverage. Its assessment retains the model, prompt hash, and
+run URL. The release-analysis agent has a four-turn, ten-minute inference limit;
+framework validation has separate bounded jobs. These limits are not a monetary
+budget.
+
+The trusted dispatcher runs the complete affected profile even if AI analysis
+fails or omits a release. Missing analysis is explicitly marked `unavailable`,
+with a warning; failed AI jobs are not turned green. Before dispatch, the code
+revalidates the reviewed execution inputs and official release artifacts.
+An unexpected downloaded artifact is rejected before Docker build or execution.
+Only the planning step reads watcher state. It passes the validated bundle and
+its hash as bounded matrix data, not executable instructions. The runner checks
+that identity before downloading archives or building a client and installs the
+frozen dependency tree offline. Results retain the bundle and hash alongside the
+actual installed dependencies; report collection checks the planned hash.
+No GitHub or inference token is passed to the isolated test client.
+
+Normal default-branch upstream runs use the same combined reports and README
+publisher as manual and scheduled runs. Verified candidate results, including compatibility
+failures and incomplete attempts, can therefore update the existing badges
+without changing the default package versions. Merely discovering a release,
+resolving its dependencies, or receiving an AI assessment cannot make a badge green.
+
+### State, retries, and recovery
+
+The orphan `compatibility-watcher-state` branch contains a single `ledger.json`,
+including the frozen npm inputs needed to reproduce its detections.
+Non-force Git reference updates reject concurrent writers. Each reservation is
+persisted before contacting the dispatch API, and the resulting workflow receipt
+is saved afterward. Git history retains earlier scans and state transitions.
+Allow the workflow's GitHub token to create and update this data branch; a denied
+write stops the operation rather than falling back to ephemeral deduplication.
+
+There are at most three automatic dispatch requests per invocation and three
+automatic attempts per detection. Only definite rate-limit rejections are
+automatically retried on later invocations. Unknown outcomes are reconciled by
+receipt or the exact detection/dispatch nonce in the workflow title, never
+blindly resent. The bounded lookup covers up to seven days and 1,000 runs.
+Incomplete lookups and duplicate nonces require attention.
+
+| Ledger status | Meaning |
+| --- | --- |
+| `pending` | Durable eligible work waiting for dispatch, possibly after a rate limit |
+| `dispatching` | A reservation exists but its API outcome is not yet established |
+| `dispatched` | A validated workflow receipt is recorded |
+| `completed` | The associated workflow is terminal, not a compatibility pass |
+| `blocked` | Automatic processing stopped and requires maintainer investigation |
+| `superseded` | The reviewed execution inputs, policy, or upstream artifacts changed |
+
+For a known workflow receipt, use **Re-run all jobs** to repeat the full selected
+profile. If dispatch was rejected or its outcome is unknown, first inspect the
+recorded watcher run and search the compatibility workflow for the exact nonce.
+If no run was accepted, manually dispatch **Ecosystem compatibility** on the
+default branch with the recorded integration/version/database, `detection_id`,
+and last attempt's `dispatch_id`. Do not create a new nonce. The consumer
+validates these inputs against the ledger, and the next
+watcher invocation can associate the manual run. After execution inputs change,
+use a new discovery rather than overriding the identity checks. An ordinary
+manual run with both IDs blank remains available independently of the watcher.
+
+Inspect compatibility artifacts and use the reporting guidance above for
+conclusive scenario failures. `completed`, successful dispatch, or AI analysis
+does not establish Working. Watcher failures remain visible as failed Actions
+jobs and ledger errors; automatic issue creation is disabled in the workflow.
+
+The ledger is bounded to 1,000 entries and 2 MiB. Exhaustion stops new writes
+and requires a reviewed retention strategy preserving the audit and deduplication
+identities. Do not delete the state branch or old detection IDs to retry work.
+Watcher state is not the compatibility-result history or an automatically
+published dashboard.
+
+Automatic dispatch uses the registry's reviewed DocumentDB releases; release
+discovery does not select new database images. Compatibility results are retained
+as workflow artifacts, not deployed to a public site.
+
+Adding a package ecosystem to discovery requires a metadata adapter and a
+reviewed version-selection policy compatible with the runner's artifact checks.
+Python and npm profiles share the existing metadata and preparation paths. Adding
+an adapter for either runtime requires its registered official package/repository,
+complete scenario contract, and an explicit `watch_version_pattern`; the reviewed
+manual manifest and lockfile remain the default for npm profiles.
+
+### Regenerate the watcher
+
+Use the pinned `gh-aw` **v0.89.21** compiler and release action mode. The
+infrastructure workflow downloads its Linux x64 binary, verifies its SHA-256,
+validates the workflow, and rejects generated-file drift. Make authored changes
+in the Markdown file, then compile with that same binary:
+
+```bash
+gh-aw compile compatibility-watcher \
+  --action-mode release --strict --validate --no-check-update
+```
+
+Commit the Markdown, generated lock workflow, and `.github/aw/actions-lock.json`
+together. Do not hand-edit the generated YAML. The pinned compiler's schema
+validation understands the Copilot permission and queued-concurrency fields;
+older standalone Actions linters may not. Local unit tests simulate inference,
+GitHub receipts, interruptions, and real Git conflicts without production
+dispatches or live inference.
 
 ## Durable Git history
 

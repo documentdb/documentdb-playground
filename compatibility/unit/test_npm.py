@@ -184,3 +184,74 @@ def test_node_source_and_lock_are_part_of_provenance(tmp_path, integration, file
     source = tmp_path / directory / filename
     source.write_text(source.read_text() + "\n")
     assert suite_digest(integration, spec, tmp_path) != original
+
+
+@pytest.mark.parametrize("integration", ["nodejs", "mongoose"])
+def test_candidate_bundle_preserves_reviewed_sources_and_uses_its_exact_lock(
+    tmp_path, registry, monkeypatch, npm_bundle, npm_archive, integration
+):
+    spec = registry["integrations"][integration]
+    major, minor, _ = spec["default_version"].split(".")
+    version = f"{major}.{int(minor) + 1}.0"
+    bundle = npm_bundle(integration, version)
+    monkeypatch.setattr(npm, "registry_bytes", lambda *args: npm_archive)
+    context = tmp_path / "context"
+    context.mkdir()
+    digest = npm.prepare_node_client(context, spec, version, npm_bundle=bundle)
+    assert digest == hashlib.sha256(npm_archive).hexdigest()
+    assert json.loads((context / "package-lock.json").read_text()) == bundle["lockfile"]
+    assert suite_digest(integration, spec, context) == suite_digest(integration, spec)
+    adapter = Path(spec["test_file"]).parent
+    for filename in ("package.json", "package-lock.json"):
+        assert (context / adapter / filename).read_bytes() == (
+            ROOT / adapter / filename
+        ).read_bytes()
+    manual = tmp_path / "manual"
+    manual.mkdir()
+    with pytest.raises(ValueError, match="lockfile"):
+        npm.prepare_node_client(manual, spec, version)
+
+
+@pytest.mark.parametrize("mutation", ["registry", "optional-link", "integrity", "driver"])
+def test_candidate_lock_is_validated_before_any_archive_access(
+    tmp_path, registry, monkeypatch, npm_bundle, mutation
+):
+    spec = registry["integrations"]["nodejs"]
+    bundle = npm_bundle()
+    selected = bundle["lockfile"]["packages"][f"node_modules/{spec['package']}"]
+    if mutation == "registry":
+        selected["resolved"] = "https://unreviewed.example/driver.tgz"
+    elif mutation == "optional-link":
+        bundle["lockfile"]["packages"]["node_modules/../../outside"] = {
+            "optional": True,
+            "link": True,
+        }
+    elif mutation == "integrity":
+        selected["integrity"] = "sha1-unreviewed"
+    else:
+        selected["version"] = "1.0.0"
+    monkeypatch.setattr(
+        npm, "registry_bytes", lambda *args: pytest.fail("Invalid lock fetched an archive")
+    )
+    context = tmp_path / "context"
+    context.mkdir()
+    with pytest.raises(ValueError):
+        npm.prepare_node_client(context, spec, spec["default_version"], npm_bundle=bundle)
+
+
+def test_registry_redirect_is_rejected_before_contacting_its_destination(monkeypatch):
+    import io
+    import urllib.error
+
+    class Transport:
+        def open(self, url, timeout):
+            raise urllib.error.HTTPError(url, 302, "redirect", {}, io.BytesIO())
+
+    def opener(handler):
+        assert isinstance(handler, npm.NoRedirect)
+        assert handler.redirect_request(None, None, 302, "", {}, "http://private.test") is None
+        return Transport()
+
+    monkeypatch.setattr(npm.urllib.request, "build_opener", opener)
+    with pytest.raises(urllib.error.HTTPError):
+        npm.registry_bytes(f"{npm.REGISTRY}/driver/-/driver-1.0.0.tgz", 100)

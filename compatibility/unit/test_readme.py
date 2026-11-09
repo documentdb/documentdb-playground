@@ -61,12 +61,13 @@ def source_run(attempt):
     }
 
 
-def incoming_report(path, record, *, include_result=True):
+def incoming_report(path, record, *, include_result=True, trigger=None):
     path.mkdir()
     profile = {**readme.profile_from_result(record), "demonstration": record["demonstration"]}
-    (path / "summary.json").write_text(
-        json.dumps({"schema_version": 1, "success": True, "integrations": [profile], "errors": []})
-    )
+    summary = {"schema_version": 1, "success": True, "integrations": [profile], "errors": []}
+    if trigger is not None:
+        summary["trigger"] = trigger
+    (path / "summary.json").write_text(json.dumps(summary))
     if include_result:
         append_result(path / "results", record)
     return path
@@ -121,6 +122,19 @@ def test_real_profile_evidence_drives_svg_json_and_accessible_details(
     assert published_record["profile"] in details
     assert "Fork preview" not in details
     assert "Results apply only" not in details
+
+
+@pytest.mark.parametrize("trigger", ["scheduled", "documentdb_release"])
+def test_scheduled_and_release_reports_publish_like_manual_reports(
+    tmp_path, registry, published_record, attempt, trigger
+):
+    record = {**published_record, "trigger": trigger}
+    incoming = incoming_report(tmp_path / "incoming", record, trigger=trigger)
+    data = tmp_path / "data"
+    readme.ingest({"action": "publish", "attempt": attempt}, ROOT, incoming, data, REPOSITORY)
+    view = readme.snapshot(data, registry, REPOSITORY, datetime.now(timezone.utc))
+    assert view["latest_workflow"]["errors"] == []
+    assert selected_row(view, record)["state"] == "Working"
 
 
 def test_missing_latest_artifact_does_not_inherit_an_earlier_pass(

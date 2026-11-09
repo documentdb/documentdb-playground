@@ -28,6 +28,7 @@ from packaging.utils import parse_wheel_filename
 from packaging.version import Version
 
 from compatibility.contracts import (
+    PYTHON_PLATFORMS,
     ROOT,
     compatibility_state,
     default_documentdb_version,
@@ -37,8 +38,9 @@ from compatibility.contracts import (
     suite_files,
     validate_client_report,
     validate_result,
+    version_allowed,
 )
-from compatibility.npm import prepare_node_client
+from compatibility.npm import prepare_node_client, read_npm_bundle, validate_npm_bundle
 
 LABEL = "org.documentdb.compatibility.run"
 MAX_COMMAND_OUTPUT = 4 * 1024 * 1024
@@ -126,14 +128,11 @@ def prepare_client(
                 "cp",
                 "--abi",
                 "cp312",
-                "--platform",
-                "manylinux_2_28_x86_64",
-                "--platform",
-                "manylinux_2_17_x86_64",
-                "--platform",
-                "manylinux2014_x86_64",
-                "--platform",
-                "manylinux1_x86_64",
+                *(
+                    argument
+                    for platform in PYTHON_PLATFORMS
+                    for argument in ("--platform", platform)
+                ),
                 "--dest",
                 str(wheels),
                 "-r",
@@ -209,16 +208,39 @@ def execute(
     demonstration: bool = False,
     run_url: str | None = None,
     trigger: str = "manual",
+    detection_id: str | None = None,
+    expected_artifact_sha256s: list[str] | None = None,
+    npm_bundle: Path | None = None,
+    expected_npm_bundle_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Emit a validated result even when setup, execution, or teardown fails."""
     spec = registry["integrations"][integration]
     database = registry["documentdb"][documentdb_version]
-    if (
-        not spec["enabled"]
-        or len(version) > 40
-        or not re.fullmatch(spec["version_pattern"], version)
+    if not spec["enabled"] or not version_allowed(
+        spec, version, upstream=trigger == "upstream_release"
     ):
         raise ValueError("Integration is disabled or the requested version is outside its policy")
+    if trigger == "upstream_release":
+        if (
+            not detection_id
+            or not re.fullmatch(r"[a-f0-9]{64}", detection_id)
+            or not expected_artifact_sha256s
+            or len(expected_artifact_sha256s) > 10
+            or any(not re.fullmatch(r"[a-f0-9]{64}", value) for value in expected_artifact_sha256s)
+            or demonstration
+        ):
+            raise ValueError(
+                "Upstream execution requires a detection ID and reviewed artifact hashes"
+            )
+    elif detection_id is not None or expected_artifact_sha256s is not None:
+        raise ValueError("Watcher provenance is only supported for upstream-release execution")
+    if trigger == "upstream_release" and spec["runtime"] == "nodejs":
+        if npm_bundle is None or not re.fullmatch(
+            r"[a-f0-9]{64}", expected_npm_bundle_sha256 or ""
+        ):
+            raise ValueError("npm upstream execution requires its frozen bundle and recorded hash")
+    elif npm_bundle is not None or expected_npm_bundle_sha256 is not None:
+        raise ValueError("npm candidate bundles are only supported for recorded npm releases")
     if wheelhouse is not None and spec["runtime"] != "python":
         raise ValueError("--wheelhouse is only supported by Python integrations")
     if package_cache is not None and spec["runtime"] != "nodejs":
@@ -263,6 +285,10 @@ def execute(
         "demonstration": demonstration,
         "execution_error": None,
     }
+    if detection_id is not None:
+        result["detection_id"] = detection_id
+    if expected_npm_bundle_sha256 is not None:
+        result["upstream"]["npm_bundle_sha256"] = expected_npm_bundle_sha256
     validate_result(result, spec)
     password = secrets.token_urlsafe(24) + "Aa1!"
     image = ""
@@ -274,8 +300,18 @@ def execute(
             if spec["runtime"] == "python":
                 digest = prepare_client(context, spec, version, wheelhouse)
             else:
-                digest = prepare_node_client(context, spec, version, package_cache)
+                bundle = None
+                if npm_bundle is not None:
+                    bundle = read_npm_bundle(npm_bundle)
+                    if validate_npm_bundle(bundle, spec, version) != expected_npm_bundle_sha256:
+                        raise ValueError("npm candidate bundle differs from the recorded inputs")
+                    result["upstream"]["npm_bundle"] = bundle
+                digest = prepare_node_client(context, spec, version, package_cache, bundle)
             result["upstream"]["artifact_sha256"] = digest
+            if expected_artifact_sha256s is not None and digest not in expected_artifact_sha256s:
+                raise ValueError(
+                    "Selected package differs from the durably recorded upstream artifacts"
+                )
             result["suite_digest"] = suite_digest(integration, spec, root=context)
             candidate_image = f"docdb-compat-{run_id}"
             command(
@@ -465,9 +501,17 @@ def main() -> int:
     parser.add_argument("--run-url")
     parser.add_argument(
         "--trigger",
-        choices=("manual", "push", "scheduled", "documentdb_release"),
+        choices=("manual", "push", "scheduled", "documentdb_release", "upstream_release"),
         default="manual",
     )
+    parser.add_argument("--detection-id")
+    parser.add_argument(
+        "--expected-artifact-sha256", dest="expected_artifact_sha256s", action="append"
+    )
+    parser.add_argument(
+        "--npm-bundle", type=Path, help="Frozen inputs from an authorized detection"
+    )
+    parser.add_argument("--expected-npm-bundle-sha256")
     parser.add_argument("--demonstration", action="store_true")
     args = parser.parse_args()
     try:
@@ -484,6 +528,10 @@ def main() -> int:
             demonstration=args.demonstration,
             run_url=args.run_url,
             trigger=args.trigger,
+            detection_id=args.detection_id,
+            expected_artifact_sha256s=args.expected_artifact_sha256s,
+            npm_bundle=args.npm_bundle,
+            expected_npm_bundle_sha256=args.expected_npm_bundle_sha256,
         )
     except KeyError:
         print("Unknown integration or DocumentDB release", file=sys.stderr)

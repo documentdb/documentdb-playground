@@ -13,6 +13,7 @@ integrations:
     package: pymongo
     default_version: "4.18.0"
     version_pattern: '^4\.(9|[1-9][0-9]+)\.[0-9]+$'
+    watch_version_pattern: '^4\.[0-9]+\.[0-9]+$'
     profile: python312-linux-x64-sync
     test_file: compatibility/integrations/pymongo/test_pymongo.py
     demonstration_file: compatibility/integrations/pymongo/test_demonstration.py
@@ -44,6 +45,7 @@ integrations:
     package: mongoose
     default_version: "9.11.0"
     version_pattern: '^9\.11\.0$'
+    watch_version_pattern: '^9\.[0-9]+\.[0-9]+$'
     profile: node24-linux-x64-mongoose
     test_file: compatibility/integrations/mongoose/test_mongoose.cjs
     demonstration_file: compatibility/integrations/mongoose/test_demonstration.cjs
@@ -75,6 +77,7 @@ integrations:
     package: mongodb
     default_version: "7.7.0"
     version_pattern: '^7\.7\.0$'
+    watch_version_pattern: '^7\.[0-9]+\.[0-9]+$'
     profile: node24-linux-x64-async
     test_file: compatibility/integrations/nodejs/test_nodejs.cjs
     demonstration_file: compatibility/integrations/nodejs/test_demonstration.cjs

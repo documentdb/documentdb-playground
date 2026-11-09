@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["resolver_image", "manifest", "lockfile"],
+  "properties": {
+    "resolver_image": {
+      "type": "string",
+      "pattern": "^node:24\\.[0-9]+\\.[0-9]+-[A-Za-z0-9_.-]+@sha256:[a-f0-9]{64}$"
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "private", "dependencies"],
+      "properties": {
+        "name": {"const": "documentdb-compatibility-candidate"},
+        "version": {"const": "1.0.0"},
+        "private": {"const": true},
+        "dependencies": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "propertyNames": {"pattern": "^[a-z][a-z0-9_-]{0,39}$"},
+          "additionalProperties": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"}
+        }
+      }
+    },
+    "lockfile": {
+      "type": "object",
+      "required": ["lockfileVersion", "packages"],
+      "properties": {
+        "lockfileVersion": {"const": 3},
+        "packages": {
+          "type": "object",
+          "minProperties": 2,
+          "maxProperties": 101,
+          "additionalProperties": {"type": "object"}
+        }
+      }
+    }
+  }
+}

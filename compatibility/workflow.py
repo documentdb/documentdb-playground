@@ -15,7 +15,7 @@ from typing import Any
 import yaml
 from packaging.version import Version
 
-from compatibility.contracts import default_documentdb_version, read_registry
+from compatibility.contracts import default_documentdb_version, read_registry, version_allowed
 from compatibility.publish import render
 from compatibility.readme import markdown_cell
 from compatibility.results import (
@@ -25,8 +25,12 @@ from compatibility.results import (
     result_key,
     validate_incoming_result,
 )
+from compatibility.watcher import validate_dispatch
+from compatibility.watcher_state import RequestError
 
-TRIGGERS = ("manual", "scheduled", "documentdb_release")
+# Automatic runs that cover every enabled integration at its reviewed default version.
+SWEEP_TRIGGERS = ("scheduled", "documentdb_release")
+TRIGGERS = ("manual", *SWEEP_TRIGGERS, "upstream_release")
 
 
 def documentdb_releases(registry: dict[str, Any], documentdb_version: str | None) -> list[str]:
@@ -65,8 +69,10 @@ def select_runs(
     """Resolve each enabled integration's own default before expanding the matrix."""
     if trigger not in TRIGGERS:
         raise ValueError("Unknown execution trigger")
-    if trigger != "manual" and (integration != "all" or version):
-        raise ValueError("Automatic runs select every enabled integration at its default version")
+    if trigger in SWEEP_TRIGGERS and (integration != "all" or version):
+        raise ValueError(
+            "Scheduled and release runs select every enabled integration at its default version"
+        )
     if trigger == "scheduled" and documentdb_version != "all":
         raise ValueError("Scheduled runs select every reviewed DocumentDB release")
     if trigger == "documentdb_release" and documentdb_version in (None, "all"):
@@ -87,7 +93,7 @@ def select_runs(
     for name in sorted(names):
         spec = registry["integrations"][name]
         selected = version or spec["default_version"]
-        if len(selected) > 40 or not re.fullmatch(spec["version_pattern"], selected):
+        if not version_allowed(spec, selected, upstream=trigger == "upstream_release"):
             raise ValueError(f"Requested version is outside the policy for {name}")
         runs.extend(
             {
@@ -109,6 +115,8 @@ def collect_report(
     *,
     expected_run_url: str | None = None,
     summary: Path | None = None,
+    detection_id: str | None = None,
+    expected_npm_bundle_sha256: str | None = None,
 ) -> bool:
     """Retain valid envelopes and expose rejected or absent evidence for every selected job."""
     if output.exists() or output.is_symlink():
@@ -155,7 +163,15 @@ def collect_report(
                     "Missing result artifact for this integration, release, and attempt"
                 )
             result = read_result(path)
-            if result_key(result) != key or result["trigger"] != run["trigger"]:
+            if (
+                result_key(result) != key
+                or result["trigger"] != run["trigger"]
+                or result.get("detection_id") != detection_id
+                or (
+                    expected_npm_bundle_sha256 is not None
+                    and result["upstream"].get("npm_bundle_sha256") != expected_npm_bundle_sha256
+                )
+            ):
                 raise ValueError("Result does not match the selected integration run")
             validate_incoming_result(result, registry, expected_run_url)
             append_result(store, result)
@@ -165,12 +181,17 @@ def collect_report(
     success = not errors and all(row["state"] == "Working" for row in rows)
     report = {
         "schema_version": 1,
+        "trigger": runs[0]["trigger"],
         "success": success,
         "errors": errors,
         "integrations": [
             {key: value for key, value in row.items() if key != "history"} for row in rows
         ],
     }
+    if detection_id is not None:
+        report["detection_id"] = detection_id
+    if expected_npm_bundle_sha256 is not None:
+        report["npm_bundle_sha256"] = expected_npm_bundle_sha256
     (output / "summary.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     lines = [
         "## Ecosystem compatibility",
@@ -181,8 +202,9 @@ def collect_report(
             else "One or more profiles or artifacts need attention."
         ),
         "",
-        "| Integration | DocumentDB | Upstream | Profile | Result | Passed | Diagnostic |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| Integration | DocumentDB | Upstream | Profile | Trigger |"
+        " Result | Passed | Diagnostic |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in rows:
         cells = [
@@ -190,6 +212,7 @@ def collect_report(
             row["documentdb_version"],
             row["upstream_version"],
             row["profile"],
+            row["trigger"] or "None",
             row["state"],
             f"{row['passed']}/{row['expected']}",
             row["error"] or "",
@@ -219,12 +242,20 @@ def main() -> int:
             "--documentdb-version",
             help="A reviewed registry release, or all; defaults to the newest",
         )
-        command.add_argument("--trigger", choices=TRIGGERS, default="manual")
+        command.add_argument(
+            "--trigger",
+            choices=("manual", *SWEEP_TRIGGERS),
+            default="manual",
+            help="Watcher provenance IDs record upstream_release instead",
+        )
+        command.add_argument("--detection-id")
+        command.add_argument("--dispatch-id")
         if name == "report":
             command.add_argument("--input", type=Path, required=True)
             command.add_argument("--output", type=Path, required=True)
             command.add_argument("--expected-run-url")
             command.add_argument("--summary", type=Path)
+            command.add_argument("--expected-npm-bundle-sha256")
     args = parser.parse_args()
     try:
         registry = read_registry()
@@ -232,16 +263,37 @@ def main() -> int:
             for release in changed_releases(registry, args.previous):
                 print(release)
             return 0
+        upstream = args.detection_id is not None or args.dispatch_id is not None
+        if upstream and args.trigger != "manual":
+            raise ValueError("Watcher provenance cannot be combined with another trigger")
         runs = select_runs(
             registry,
             args.integration,
             args.version,
             args.documentdb_version,
-            trigger=args.trigger,
+            trigger="upstream_release" if upstream else args.trigger,
         )
+        if upstream:
+            if (
+                not re.fullmatch(r"[a-f0-9]{64}", args.detection_id or "")
+                or not re.fullmatch(r"[a-f0-9]{32}", args.dispatch_id or "")
+                or len(runs) != 1
+            ):
+                raise ValueError("Watcher provenance requires one profile and both valid IDs")
+            if args.command == "matrix":
+                prepared = validate_dispatch(registry, runs, args.detection_id, args.dispatch_id)
+                runs[0].update(detection_id=args.detection_id, **prepared)
         if args.command == "matrix":
             print(json.dumps({"include": runs}, separators=(",", ":")))
             return 0
+        npm_release = (
+            upstream and registry["integrations"][runs[0]["integration"]]["runtime"] == "nodejs"
+        )
+        if npm_release:
+            if not re.fullmatch(r"[a-f0-9]{64}", args.expected_npm_bundle_sha256 or ""):
+                raise ValueError("npm release reports require the planned candidate bundle hash")
+        elif args.expected_npm_bundle_sha256 is not None:
+            raise ValueError("A candidate bundle hash requires one recorded npm release")
         success = collect_report(
             args.input,
             args.output,
@@ -249,8 +301,10 @@ def main() -> int:
             runs,
             expected_run_url=args.expected_run_url,
             summary=args.summary,
+            detection_id=args.detection_id,
+            expected_npm_bundle_sha256=args.expected_npm_bundle_sha256,
         )
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, KeyError, TypeError, RequestError) as error:
         print(f"Invalid compatibility workflow request: {error}", file=sys.stderr)
         return 2
     print(f"Combined report: {args.output / 'summary.md'}")

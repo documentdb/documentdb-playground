@@ -1,4 +1,5 @@
 name: Ecosystem compatibility
+run-name: ${{ inputs.detection_id != '' && format('Ecosystem compatibility [watch:{0}:{1}]', inputs.detection_id, inputs.dispatch_id) || 'Ecosystem compatibility' }}
 
 on:
   workflow_dispatch:
@@ -29,6 +30,14 @@ on:
           - documentdb_release
         default: manual
         required: true
+      detection_id:
+        description: Recorded upstream detection ID (leave blank for a manual run)
+        type: string
+        required: false
+      dispatch_id:
+        description: Recorded dispatch nonce (required with detection_id)
+        type: string
+        required: false
   schedule:
     - cron: "41 5 * * *"
 
@@ -58,12 +67,20 @@ jobs:
           VERSION: ${{ inputs.version }}
           DOCUMENTDB_VERSION: ${{ github.event_name == 'schedule' && 'all' || inputs.documentdb_version }}
           TRIGGER: ${{ github.event_name == 'schedule' && 'scheduled' || inputs.trigger }}
+          DETECTION_ID: ${{ inputs.detection_id }}
+          DISPATCH_ID: ${{ inputs.dispatch_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+          COMPATIBILITY_WATCHER_ENABLED: ${{ vars.COMPATIBILITY_WATCHER_ENABLED }}
+          COMPATIBILITY_WATCHER_MODEL: ${{ vars.COMPATIBILITY_WATCHER_MODEL }}
         run: |
           args=()
           if [ -n "$INTEGRATION" ]; then args+=(--integration "$INTEGRATION"); fi
           if [ -n "$DOCUMENTDB_VERSION" ]; then args+=(--documentdb-version "$DOCUMENTDB_VERSION"); fi
           if [ -n "$VERSION" ]; then args+=(--version "$VERSION"); fi
           if [ -n "$TRIGGER" ]; then args+=(--trigger "$TRIGGER"); fi
+          if [ -n "$DETECTION_ID" ] || [ -n "$DISPATCH_ID" ]; then
+            args+=(--detection-id "$DETECTION_ID" --dispatch-id "$DISPATCH_ID")
+          fi
           matrix=$(python -m compatibility.workflow matrix "${args[@]}")
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
   test:
@@ -90,6 +107,10 @@ jobs:
           VERSION: ${{ matrix.version }}
           DOCUMENTDB_VERSION: ${{ matrix.documentdb_version }}
           TRIGGER: ${{ matrix.trigger }}
+          DETECTION_ID: ${{ matrix.detection_id }}
+          EXPECTED_ARTIFACTS: ${{ join(matrix.artifact_sha256s || fromJSON('[]'), ',') }}
+          NPM_BUNDLE: ${{ matrix.npm_bundle }}
+          EXPECTED_NPM_BUNDLE_SHA256: ${{ matrix.npm_bundle_sha256 }}
         run: |
           args=(
             --integration "$INTEGRATION"
@@ -99,6 +120,18 @@ jobs:
             --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
             --trigger "$TRIGGER"
           )
+          if [ -n "$DETECTION_ID" ]; then
+            args+=(--detection-id "$DETECTION_ID")
+            IFS=, read -r -a artifacts <<< "$EXPECTED_ARTIFACTS"
+            for artifact in "${artifacts[@]}"; do args+=(--expected-artifact-sha256 "$artifact"); done
+            if [ -n "$NPM_BUNDLE" ]; then
+              printf '%s' "$NPM_BUNDLE" > "$RUNNER_TEMP/compatibility-npm-candidate.json"
+              args+=(
+                --npm-bundle "$RUNNER_TEMP/compatibility-npm-candidate.json"
+                --expected-npm-bundle-sha256 "$EXPECTED_NPM_BUNDLE_SHA256"
+              )
+            fi
+          fi
           python -m compatibility.runner "${args[@]}"
       - name: Retain integration results and sanitized diagnostics
         if: always()
@@ -136,6 +169,9 @@ jobs:
           VERSION: ${{ inputs.version }}
           DOCUMENTDB_VERSION: ${{ github.event_name == 'schedule' && 'all' || inputs.documentdb_version }}
           TRIGGER: ${{ github.event_name == 'schedule' && 'scheduled' || inputs.trigger }}
+          DETECTION_ID: ${{ inputs.detection_id }}
+          DISPATCH_ID: ${{ inputs.dispatch_id }}
+          EXPECTED_NPM_BUNDLE_SHA256: ${{ fromJSON(needs.plan.outputs.matrix).include[0].npm_bundle_sha256 }}
         run: |
           args=(
             --input incoming
@@ -147,6 +183,12 @@ jobs:
           if [ -n "$DOCUMENTDB_VERSION" ]; then args+=(--documentdb-version "$DOCUMENTDB_VERSION"); fi
           if [ -n "$VERSION" ]; then args+=(--version "$VERSION"); fi
           if [ -n "$TRIGGER" ]; then args+=(--trigger "$TRIGGER"); fi
+          if [ -n "$DETECTION_ID" ] || [ -n "$DISPATCH_ID" ]; then
+            args+=(--detection-id "$DETECTION_ID" --dispatch-id "$DISPATCH_ID")
+          fi
+          if [ -n "$EXPECTED_NPM_BUNDLE_SHA256" ]; then
+            args+=(--expected-npm-bundle-sha256 "$EXPECTED_NPM_BUNDLE_SHA256")
+          fi
           python -m compatibility.workflow report "${args[@]}"
       - name: Retain the combined summary and dashboard
         if: always()
