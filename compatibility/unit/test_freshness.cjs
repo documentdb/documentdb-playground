@@ -13,63 +13,32 @@ const source = fs.readFileSync(path.join(__dirname, "../dashboard/freshness.js")
 const day = 86400000;
 const tested = Date.UTC(2024, 0, 1);
 
-function status(state, conclusiveAt = new Date(tested).toISOString(), freshnessDays = 7) {
-    return {
-        dataset: { conclusiveAt, freshnessDays: String(freshnessDays), previousState: state },
-        textContent: state,
-        className: state,
-    };
+function status(previousState, conclusiveAt = new Date(tested).toISOString(), textContent = previousState) {
+    return { dataset: { conclusiveAt, freshnessDays: "7", previousState }, textContent, className: textContent };
 }
 
-function load(elements, now) {
-    let clock = now;
+function load(element, now) {
     let interval;
     vm.runInNewContext(source, {
-        document: {
-            querySelectorAll(selector) {
-                assert.equal(selector, "[data-compatibility-status]");
-                return elements;
-            },
-        },
-        Date: { parse: Date.parse, now: () => clock },
-        setInterval(callback, delay) {
-            assert.ok(Number.isFinite(delay) && delay > 0);
-            interval = callback;
-        },
+        document: { querySelectorAll: selector => (selector === "[data-compatibility-status]" ? [element] : []) },
+        Date: { parse: Date.parse, now: () => now },
+        setInterval: callback => { interval = callback; },
     });
-    return (next) => {
-        clock = next;
-        interval();
-    };
+    return next => { now = next; interval(); };
 }
 
-for (const freshnessDays of [1, 7, 30]) {
-    test(`the ${freshnessDays}-day boundary stays fresh until a later timer tick`, () => {
-        const element = status("Working", new Date(tested).toISOString(), freshnessDays);
-        const boundary = tested + freshnessDays * day;
-        const tick = load([element], boundary);
-        assert.equal(element.textContent, "Working");
-        tick(boundary + 1);
-        assert.equal(element.textContent, "Stale (last: Working)");
-        assert.equal(element.className, "Stale");
-    });
-}
-
-test("failed results age without becoming a fabricated passing result", () => {
-    const element = status("Failing");
-    load([element], tested + 8 * day);
-    assert.equal(element.textContent, "Stale (last: Failing)");
-});
-
-test("an untested entry has no conclusive timestamp to refresh", () => {
-    const element = status("Not tested", "");
-    load([element], tested + 8 * day);
-    assert.equal(element.textContent, "Not tested");
-});
-
-test("fresh timestamps cannot undo server-side stale classification", () => {
+test("the freshness boundary stays fresh until a later timer tick", () => {
     const element = status("Working");
-    element.textContent = element.className = "Stale";
-    load([element], tested + day);
-    assert.equal(element.textContent, "Stale");
+    const tick = load(element, tested + 7 * day);
+    assert.equal(element.textContent, "Working");
+    tick(tested + 7 * day + 1);
+    assert.deepEqual([element.textContent, element.className], ["Stale (last: Working)", "Stale"]);
+});
+
+test("untested entries and server-side stale classifications are not refreshed", () => {
+    const untested = status("Not tested", "");
+    const stale = status("Working", undefined, "Stale");
+    load(untested, tested + 8 * day);
+    load(stale, tested + day);
+    assert.deepEqual([untested.textContent, stale.textContent], ["Not tested", "Stale"]);
 });

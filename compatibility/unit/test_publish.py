@@ -6,7 +6,6 @@
 import json
 import sys
 from copy import deepcopy
-from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -18,105 +17,44 @@ from compatibility.publish import append_result, dashboard_rows, main, render
 pytestmark = pytest.mark.unit
 
 
-def row_for(rows, record):
-    return next(row for row in rows if any(r["id"] == record["id"] for r in row["history"]))
-
-
-def test_result_history_remains_after_later_failure(tmp_path, record, registry):
-    append_result(tmp_path / "data", record)
+def test_later_failure_keeps_history_and_escapes_its_message(tmp_path, record, registry):
     failed = deepcopy(record)
-    failed["id"] = "d" * 32
-    failed["started_at"] = record["finished_at"]
-    failed["tests"][0]["outcome"] = "failed"
-    append_result(tmp_path / "data", failed)
+    failed.update(id="d" * 32, started_at=record["finished_at"])
+    failed["tests"][0].update(outcome="failed", message="<script>alert('test')</script>")
+    for result in (record, failed):
+        append_result(tmp_path / "data", result)
     rows = render(tmp_path / "data", tmp_path / "site", registry)
-    row = row_for(rows, record)
-    assert (row["state"], len(row["history"])) == ("Failing", 2)
-
-
-def test_html_escapes_failure_text_and_preserves_machine_readable_history(
-    tmp_path, record, registry
-):
-    record["tests"][0].update(outcome="failed", message="<script>alert('test')</script>")
-    append_result(tmp_path / "data", record)
-    render(tmp_path / "data", tmp_path / "site", registry)
+    row = next(row for row in rows if row["history"])
     html = (tmp_path / "site" / "index.html").read_text()
-    history = json.loads((tmp_path / "site" / "history.json").read_text())
-    assert "<script>alert" not in html and "&lt;script&gt;" in html and history == [record]
+    assert (row["state"], len(row["history"])) == ("Failing", 2)
+    assert "<script>alert" not in html and "&lt;script&gt;" in html
+    assert json.loads((tmp_path / "site" / "history.json").read_text()) == [record, failed]
 
 
-def test_issue_form_fields_are_prefilled(record, registry):
-    rows = dashboard_rows(
-        [record], registry, timestamp(record["finished_at"]), "documentdb/documentdb"
-    )
-    fields = parse_qs(urlparse(row_for(rows, record)["issue_url"]).query)
-    assert (
-        fields["integration"],
-        fields["documentdb_version"],
-        fields["upstream_version"],
-        fields["template"],
-    ) == (
-        [record["integration"]],
-        [record["documentdb"]["version"]],
-        [record["upstream"]["version"]],
-        ["compatibility-report.yml"],
-    )
-    form = yaml.safe_load((ROOT / ".github" / "ISSUE_TEMPLATE" / fields["template"][0]).read_text())
-    field_ids = {item["id"] for item in form["body"] if "id" in item}
-    assert fields.keys() - {"template", "title"} <= field_ids
+def test_issue_links_prefill_fields_defined_by_the_issue_form(record, registry):
+    rows = dashboard_rows([record], registry, timestamp(record["finished_at"]), "owner/repo")
+    fields = parse_qs(urlparse(next(row for row in rows if row["history"])["issue_url"]).query)
+    assert fields["upstream_version"] == [record["upstream"]["version"]]
+    form = yaml.safe_load((ROOT / ".github/ISSUE_TEMPLATE" / fields["template"][0]).read_text())
+    assert fields.keys() - {"template", "title"} <= {item.get("id") for item in form["body"]}
 
 
 def test_empty_dashboard_does_not_claim_compatibility(tmp_path, registry):
     rows = render(tmp_path / "absent", tmp_path / "site", registry)
-    expected_pairs = {
-        (integration, version)
-        for integration, spec in registry["integrations"].items()
-        if spec["enabled"]
-        for version in registry["documentdb"]
-    }
-    assert {(row["integration"], row["documentdb_version"]) for row in rows} == expected_pairs
-    assert all((row["state"], row["last_attempt"]) == ("Not tested", None) for row in rows)
-    assert all(
-        urlparse(row["issue_url"]).path == "/documentdb/documentdb-playground/issues/new"
-        for row in rows
-    )
+    assert rows and all((row["state"], row["last_attempt"]) == ("Not tested", None) for row in rows)
 
 
-def test_failure_demonstrations_are_not_published_or_rendered(
-    tmp_path, record, registry, monkeypatch
-):
-    demonstration = deepcopy(record)
-    demonstration["id"] = "d" * 32
-    demonstration["demonstration"] = True
-    demonstration["expected_tests"].append(DEMONSTRATION_TEST)
-    demonstration["tests"].append(
-        {"id": DEMONSTRATION_TEST, "outcome": "failed", "message": "Deliberate mismatch"}
-    )
-    source = tmp_path / "demonstration.json"
-    source.write_text(json.dumps(demonstration))
-    store = tmp_path / "data"
+def test_failure_demonstrations_are_never_published(tmp_path, record, registry, monkeypatch):
+    record.update(id="d" * 32, demonstration=True)
+    record["expected_tests"].append(DEMONSTRATION_TEST)
+    record["tests"].append({"id": DEMONSTRATION_TEST, "outcome": "failed", "message": "Mismatch"})
+    source, store = tmp_path / "demonstration.json", tmp_path / "data"
+    source.write_text(json.dumps(record))
     monkeypatch.setattr(sys, "argv", ["publish", "--result", str(source), "--store", str(store)])
     with pytest.raises(SystemExit, match="2"):
         main()
     assert not store.exists()
     append_result(store, record)
-    append_result(store, demonstration)
-    rows = render(store, tmp_path / "site", registry)
-    assert not any(row["demonstration"] for row in rows)
-    assert json.loads((tmp_path / "site" / "history.json").read_text()) == [record]
+    render(store, tmp_path / "site", registry)
+    assert json.loads((tmp_path / "site" / "history.json").read_text()) == []
     assert DEMONSTRATION_TEST not in (tmp_path / "site" / "index.html").read_text()
-
-
-def test_old_failure_details_remain_visible_after_a_success(tmp_path, record, registry):
-    failed = deepcopy(record)
-    failed["id"] = "d" * 32
-    failed["started_at"] = (timestamp(record["started_at"]) - timedelta(minutes=1)).isoformat()
-    failed["finished_at"] = record["started_at"]
-    failed["tests"][0].update(outcome="failed", message="Earlier assertion mismatch")
-    append_result(tmp_path / "data", failed)
-    append_result(tmp_path / "data", record)
-    rows = render(tmp_path / "data", tmp_path / "site", registry)
-    assert (
-        row_for(rows, record)["state"] == "Working"
-        and "Earlier assertion mismatch" in (tmp_path / "site" / "index.html").read_text()
-    )

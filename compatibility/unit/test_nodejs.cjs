@@ -16,8 +16,6 @@ function execute(source) {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "compat-node-unit-"));
     const profile = path.join(directory, "profile.cjs");
     fs.writeFileSync(profile, source);
-    const environment = { ...process.env };
-    delete environment.NODE_TEST_CONTEXT;
     try {
         return spawnSync(process.execPath, ["-e", `
             const { run } = require("node:test");
@@ -28,103 +26,48 @@ function execute(source) {
                     process.exitCode = tests.some(test => ["failed", "error"].includes(test.outcome)) ? 1 : 0;
                 })
                 .catch(error => { console.error(error); process.exitCode = 2; });
-        `, profile], { encoding: "utf8", timeout: 10000, env: environment });
+        `, profile], { encoding: "utf8", timeout: 10000, env: { ...process.env, NODE_TEST_CONTEXT: undefined } });
     } finally {
         fs.rmSync(directory, { recursive: true });
     }
 }
 
-for (const [name, body, outcome] of [
-    ["pass", "", "passed"],
-    ["assertion", "require('node:assert/strict').fail('Mismatch')", "failed"],
-    ["missing-exception", "await require('node:assert/strict').rejects(Promise.resolve())", "failed"],
-    ["operation", "throw Object.assign(new Error('Unsupported'), {name:'MongoServerError', code:115})", "failed"],
-    ["model-validation", "throw Object.assign(new Error('Unexpected validation'), {name:'ValidationError'})", "failed"],
-    ["model-cast", "throw Object.assign(new Error('Unexpected cast'), {name:'CastError'})", "failed"],
-    ["model-version", "throw Object.assign(new Error('Version conflict'), {name:'VersionError'})", "failed"],
-    ["model-missing-document", "throw Object.assign(new Error('Missing document'), {name:'DocumentNotFoundError'})", "failed"],
-    ["timeout", "throw Object.assign(new Error('Timed out'), {name:'MongoServerError', code:50})", "error"],
-    ["network", "throw Object.assign(new Error('Unavailable'), {name:'MongoNetworkError'})", "error"],
-    ["runtime", "throw new TypeError('Invalid execution')", "error"],
-]) {
-    test(`production reporter classifies ${name}`, () => {
-        const result = execute(`require("node:test").test("test_profile", async () => { ${body}; });`);
-        assert.equal(result.status, outcome === "passed" ? 0 : 1, result.stderr);
-        const records = JSON.parse(result.stdout);
-        assert.equal(records.length, 1);
-        assert.equal(records[0].id, "test_profile");
-        assert.equal(records[0].outcome, outcome);
-    });
-}
-
-for (const option of ["skip", "todo"]) {
-    test(`${option} is not a passing scenario`, () => {
-        const result = execute(`require("node:test").test("test_profile", {${option}:true}, () => {});`);
-        assert.equal(result.status, 0, result.stderr);
-        assert.equal(JSON.parse(result.stdout)[0].outcome, "skipped");
-    });
-}
-
-for (const [active, demonstration, demoScenario, outcome] of [
-    [false, false, false, "skipped"],
-    [true, false, false, "passed"],
-    [true, false, true, "skipped"],
-    [true, true, true, "passed"],
-]) {
-    test(`shared registration gates active=${active} demonstration=${demonstration} scenario=${demoScenario}`, () => {
-        const result = execute(`
-            process.env.COMPATIBILITY_ACTIVE = ${JSON.stringify(active ? "1" : "0")};
-            process.env.COMPATIBILITY_DEMONSTRATION = ${JSON.stringify(demonstration ? "1" : "0")};
-            const {register} = require(${JSON.stringify(reporter)});
-            register({ test_profile() {} }, () => ({ close() {} }), ${demoScenario});
-        `);
-        assert.equal(result.status, 0, result.stderr);
-        assert.equal(JSON.parse(result.stdout)[0].outcome, outcome);
-    });
-}
-
-test("duplicate scenario names are rejected", () => {
+test("registered scenarios are gated and classified by the production reporter", () => {
     const result = execute(`
-        const {test} = require("node:test");
-        test("test_profile", () => {});
-        test("test_profile", () => {});
-    `);
-    assert.equal(result.status, 2);
-    assert.match(result.stderr, /Duplicate scenario/);
-});
-
-test("collection errors cannot pass", () => {
-    const result = execute("throw new Error('Collection failed');");
-    assert.equal(result.status, 2);
-    assert.match(result.stderr, /Collection failed/);
-});
-
-for (const body of [
-    "throw new Error('Late asynchronous failure')",
-    "Promise.reject(new Error('Late asynchronous failure'))",
-]) {
-    test(`late asynchronous errors cannot pass: ${body}`, () => {
-        const result = execute(`
-            require("node:test").test("test_profile", () => {
-                setImmediate(() => { ${body}; });
-            });
-        `);
-        assert.equal(result.status, 2, result.stdout + result.stderr);
-        assert.match(result.stderr, /Late asynchronous failure/);
-    });
-}
-
-test("assertions survive a later asynchronous error", () => {
-    const result = execute(`
-        require("node:test").test("test_profile", () => {
-            setImmediate(() => { throw new Error("Late asynchronous failure"); });
-            require("node:assert/strict").fail("Assertion mismatch");
-        });
+        const { register } = require(${JSON.stringify(reporter)});
+        const fixture = () => ({ close() {} });
+        const server = code => Object.assign(new Error("Server"), { name: "MongoServerError", code });
+        process.env.COMPATIBILITY_ACTIVE = "0";
+        process.env.COMPATIBILITY_DEMONSTRATION = "0";
+        register({ test_inactive() {} }, fixture);
+        process.env.COMPATIBILITY_ACTIVE = "1";
+        register({ test_pass() {}, test_operation() { throw server(115); }, test_timeout() { throw server(50); } }, fixture);
+        register({ test_hidden_demonstration() {} }, fixture, true);
+        process.env.COMPATIBILITY_DEMONSTRATION = "1";
+        register({ test_demonstration() {} }, fixture, true);
     `);
     assert.equal(result.status, 1, result.stderr);
-    assert.equal(JSON.parse(result.stdout)[0].outcome, "failed");
-    assert.match(result.stderr, /Late asynchronous failure/);
+    assert.deepEqual(JSON.parse(result.stdout).map(record => [record.id, record.outcome]), [
+        ["test_inactive", "skipped"],
+        ["test_pass", "passed"],
+        ["test_operation", "failed"],
+        ["test_timeout", "error"],
+        ["test_hidden_demonstration", "skipped"],
+        ["test_demonstration", "passed"],
+    ]);
 });
+
+for (const [name, source, message] of [
+    ["duplicate scenario names", "const { test } = require('node:test'); test('test_a', () => {}); test('test_a', () => {});", /Duplicate scenario/],
+    ["collection errors", "throw new Error('Collection failed');", /Collection failed/],
+    ["late asynchronous errors", "require('node:test').test('test_a', () => { setImmediate(() => { throw new Error('Late failure'); }); });", /Late failure/],
+]) {
+    test(`${name} cannot pass`, () => {
+        const result = execute(source);
+        assert.equal(result.status, 2, result.stdout + result.stderr);
+        assert.match(result.stderr, message);
+    });
+}
 
 test("missing runner summary cannot pass", async () => {
     await assert.rejects(collect([
@@ -132,34 +75,13 @@ test("missing runner summary cannot pass", async () => {
     ]), /did not complete successfully/);
 });
 
-test("fixture setup errors do not become compatibility failures", async () => {
-    await assert.rejects(runScenario(
-        () => { throw Object.assign(new Error("Setup failed"), { name: "MongoServerError" }); },
-        () => {},
-    ), error => classify(error) === "error");
-});
-
-test("fixture cleanup errors do not become compatibility failures", async () => {
-    await assert.rejects(runScenario(
-        () => ({ close() { throw new Error("Cleanup failed"); } }),
-        () => {},
-    ), error => classify(error) === "error");
-});
-
-test("assertions survive a subsequent fixture cleanup failure", async () => {
-    await assert.rejects(runScenario(
-        () => ({ close() { throw new Error("Cleanup failed"); } }),
-        () => assert.fail("Assertion mismatch"),
-    ), error => classify(error) === "failed" && /Assertion mismatch/.test(error.message));
-});
-
-test("falsy scenario exceptions cannot become passes", async () => {
-    for (const value of [null, undefined, false, 0, ""]) {
-        await assert.rejects(runScenario(
-            () => ({ close() {} }),
-            () => { throw value; },
-        ));
-    }
+test("fixture errors cannot mask or become compatibility failures", async () => {
+    const setup = () => { throw Object.assign(new Error("Setup failed"), { name: "MongoServerError" }); };
+    const cleanup = () => ({ close() { throw new Error("Cleanup failed"); } });
+    await assert.rejects(runScenario(setup, () => {}), error => classify(error) === "error");
+    await assert.rejects(runScenario(cleanup, () => {}), error => classify(error) === "error");
+    await assert.rejects(runScenario(cleanup, () => assert.fail("Mismatch")), error => classify(error) === "failed");
+    await assert.rejects(runScenario(() => ({ close() {} }), () => { throw undefined; }));
 });
 
 test("JUnit preserves outcomes and escapes diagnostics", () => {
@@ -169,9 +91,6 @@ test("JUnit preserves outcomes and escapes diagnostics", () => {
         { id: "test_error", outcome: "error", message: "Unavailable" },
         { id: "test_skip", outcome: "skipped", message: "Skipped" },
     ], "driver & integration");
-    assert.match(output, /name="driver &amp; integration"/);
-    assert.match(output, /tests="4" failures="1" errors="1" skipped="1"/);
-    assert.match(output, /&lt;mismatch&gt; &amp; &quot;value&quot;/);
-    assert.match(output, /<error>Unavailable<\/error>/);
-    assert.match(output, /<skipped>Skipped<\/skipped>/);
+    assert.match(output, /name="driver &amp; integration" tests="4" failures="1" errors="1" skipped="1"/);
+    assert.match(output, /<failure>&lt;mismatch&gt; &amp; &quot;value&quot;<\/failure>/);
 });

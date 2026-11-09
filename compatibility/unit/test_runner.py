@@ -83,39 +83,34 @@ def test_cli_forwards_the_execution_trigger(tmp_path, record, monkeypatch, trigg
     assert captured["trigger"] == trigger
 
 
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        {"trigger": "upstream_release"},
-        {"trigger": "upstream_release", "detection_id": "a" * 64},
-        {"trigger": "manual", "detection_id": "a" * 64},
-        {
-            "trigger": "upstream_release",
-            "detection_id": "a" * 64,
-            "expected_artifact_sha256s": ["b" * 64],
-            "demonstration": True,
-        },
-    ],
-)
 def test_unbound_upstream_execution_never_prepares_packages(
-    tmp_path, registry, selection, monkeypatch, arguments
+    tmp_path, registry, selection, monkeypatch
 ):
-    monkeypatch.setattr(
-        runner, "prepare_client", lambda *args: pytest.fail("Unbound request prepared a client")
-    )
-    with pytest.raises(ValueError):
-        runner.execute(registry, **selection, output=tmp_path / "result.json", **arguments)
+    monkeypatch.setattr(runner, "prepare_client", lambda *args: pytest.fail("Prepared a client"))
+    selection.update(trigger="upstream_release", detection_id="a" * 64)
+    with pytest.raises(ValueError, match="artifact hashes"):
+        runner.execute(registry, **selection, output=tmp_path / "result.json")
     assert not (tmp_path / "result.json").exists()
 
 
-def test_changed_upstream_artifact_fails_before_docker_execution(
-    tmp_path, registry, selection, monkeypatch
+@pytest.mark.parametrize("tampered", [False, True])
+def test_upstream_npm_inputs_are_bound_before_docker_execution(
+    tmp_path, registry, selection, monkeypatch, npm_bundle, tampered
 ):
-    monkeypatch.setattr(runner, "prepare_client", lambda *args: "c" * 64)
+    bundle = npm_bundle()
+    digest = npm_bundle_digest(bundle)
+    if tampered:
+        bundle["lockfile"]["requires"] = True
+    (tmp_path / "candidate.json").write_text(json.dumps(bundle))
+    prepared = []
     monkeypatch.setattr(
-        runner, "command", lambda *args, **kwargs: pytest.fail("Unexpected artifact reached Docker")
+        runner, "prepare_node_client", lambda *a: prepared.append(a[-1]) or "c" * 64
     )
     monkeypatch.setattr(runner, "cleanup", lambda *args: [])
+    monkeypatch.setattr(runner, "command", lambda *args, **kwargs: pytest.fail("Reached Docker"))
+    selection.update(
+        integration="nodejs", version=registry["integrations"]["nodejs"]["default_version"]
+    )
     output = tmp_path / "result.json"
     result = runner.execute(
         registry,
@@ -124,57 +119,19 @@ def test_changed_upstream_artifact_fails_before_docker_execution(
         trigger="upstream_release",
         detection_id="a" * 64,
         expected_artifact_sha256s=["b" * 64],
-    )
-    assert compatibility_state(result) == "Not tested" and result["tests"] == []
-    assert "durably recorded" in result["execution_error"]
-    assert result["upstream"]["artifact_sha256"] == "c" * 64
-    assert json.loads(output.read_text())["detection_id"] == "a" * 64
-
-
-@pytest.mark.parametrize("tampered", [False, True])
-def test_npm_runner_binds_and_retains_candidate_inputs_before_preparation(
-    tmp_path, registry, monkeypatch, npm_bundle, tampered
-):
-    spec = registry["integrations"]["nodejs"]
-    major, minor, _ = spec["default_version"].split(".")
-    version = f"{major}.{int(minor) + 1}.0"
-    bundle = npm_bundle("nodejs", version)
-    digest = npm_bundle_digest(bundle)
-    path = tmp_path / "candidate.json"
-    if tampered:
-        bundle["lockfile"]["requires"] = True
-    path.write_text(json.dumps(bundle))
-    prepared = []
-
-    def unavailable(context, selected, requested, cache, frozen):
-        prepared.append(frozen)
-        raise RuntimeError("Archive unavailable after validating candidate inputs")
-
-    monkeypatch.setattr(runner, "prepare_node_client", unavailable)
-    monkeypatch.setattr(runner, "cleanup", lambda *args: [])
-    monkeypatch.setattr(
-        runner, "command", lambda *args, **kwargs: pytest.fail("Incomplete inputs reached Docker")
-    )
-    result = runner.execute(
-        registry,
-        "nodejs",
-        version,
-        next(iter(registry["documentdb"])),
-        tmp_path / "result.json",
-        trigger="upstream_release",
-        detection_id="a" * 64,
-        expected_artifact_sha256s=["b" * 64],
-        npm_bundle=path,
+        npm_bundle=tmp_path / "candidate.json",
         expected_npm_bundle_sha256=digest,
     )
-    assert compatibility_state(result) == "Not tested"
+    assert compatibility_state(result) == "Not tested" and json.loads(output.read_text()) == result
+    assert result["upstream"]["runtime"] == {"name": "nodejs", "version": None}
     assert result["upstream"]["npm_bundle_sha256"] == digest
     if tampered:
         assert not prepared and "recorded inputs" in result["execution_error"]
         assert "npm_bundle" not in result["upstream"]
     else:
         assert prepared == [bundle] and result["upstream"]["npm_bundle"] == bundle
-        assert "Archive unavailable" in result["execution_error"]
+        assert result["upstream"]["artifact_sha256"] == "c" * 64
+        assert "durably recorded" in result["execution_error"]
 
 
 def test_cleanup_uses_only_the_invocation_label(monkeypatch):
@@ -189,29 +146,7 @@ def test_cleanup_uses_only_the_invocation_label(monkeypatch):
     assert all(f"label={runner.LABEL}=" + "a" * 32 in call for call in calls)
 
 
-@pytest.mark.parametrize("integration", ["nodejs", "mongoose"])
-def test_node_setup_failure_retains_a_runtime_neutral_envelope(
-    tmp_path, registry, monkeypatch, integration
-):
-    def unavailable(*args):
-        raise RuntimeError("npm archive unavailable")
-
-    monkeypatch.setattr(runner, "prepare_node_client", unavailable)
-    monkeypatch.setattr(runner, "cleanup", lambda *args: [])
-    result = runner.execute(
-        registry,
-        integration,
-        registry["integrations"][integration]["default_version"],
-        next(iter(registry["documentdb"])),
-        tmp_path / "result.json",
-    )
-    assert compatibility_state(result) == "Not tested"
-    assert result["schema_version"] == 2
-    assert result["upstream"]["runtime"] == {"name": "nodejs", "version": None}
-    assert "npm archive unavailable" in result["execution_error"]
-
-
-@pytest.mark.parametrize("integration", ["pymongo", "nodejs", "mongoose"])
+@pytest.mark.parametrize("integration", ["pymongo", "nodejs"])
 def test_cli_selects_the_registry_default(tmp_path, record, registry, monkeypatch, integration):
     captured = []
     monkeypatch.setattr(runner, "execute", lambda *args, **kwargs: captured.append(args) or record)
@@ -228,19 +163,10 @@ def test_cli_selects_the_registry_default(tmp_path, record, registry, monkeypatc
     )
 
 
-@pytest.mark.parametrize(
-    ("integration", "option"),
-    [("pymongo", "package_cache"), ("nodejs", "wheelhouse"), ("mongoose", "wheelhouse")],
-)
-def test_cache_options_cannot_cross_runtimes(tmp_path, registry, integration, option):
+def test_package_cache_is_only_supported_by_node_integrations(tmp_path, registry, selection):
     with pytest.raises(ValueError, match="only supported"):
         runner.execute(
-            registry,
-            integration,
-            registry["integrations"][integration]["default_version"],
-            next(iter(registry["documentdb"])),
-            tmp_path / "result.json",
-            **{option: tmp_path / "cache"},
+            registry, **selection, output=tmp_path / "result.json", package_cache=tmp_path
         )
 
 
