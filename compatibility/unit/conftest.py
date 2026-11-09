@@ -3,6 +3,7 @@
 
 """Validated test records for compatibility infrastructure."""
 
+import base64
 import hashlib
 import io
 import json
@@ -17,6 +18,7 @@ import pytest
 
 from compatibility import runner
 from compatibility.contracts import ROOT, read_registry, suite_digest
+from compatibility.npm import REGISTRY, node_image
 
 
 @pytest.fixture
@@ -58,6 +60,45 @@ Path(sys.argv[2]).write_text(json.dumps(
 @pytest.fixture
 def registry():
     return read_registry()
+
+
+@pytest.fixture
+def npm_archive():
+    return b"synthetic npm archive for contract tests"
+
+
+@pytest.fixture
+def npm_bundle(registry, npm_archive):
+    def make(integration="nodejs", version=None):
+        spec = registry["integrations"][integration]
+        selected = version or spec["default_version"]
+        archive = f"{REGISTRY}/{spec['package']}/-/{spec['package']}-{selected}.tgz"
+        manifest = {
+            "name": "documentdb-compatibility-candidate",
+            "version": "1.0.0",
+            "private": True,
+            "dependencies": {spec["package"]: selected},
+        }
+        return {
+            "resolver_image": node_image(spec),
+            "manifest": manifest,
+            "lockfile": {
+                "name": manifest["name"],
+                "version": manifest["version"],
+                "lockfileVersion": 3,
+                "packages": {
+                    "": deepcopy(manifest),
+                    f"node_modules/{spec['package']}": {
+                        "version": selected,
+                        "resolved": archive,
+                        "integrity": "sha512-"
+                        + base64.b64encode(hashlib.sha512(npm_archive).digest()).decode(),
+                    },
+                },
+            },
+        }
+
+    return make
 
 
 @pytest.fixture

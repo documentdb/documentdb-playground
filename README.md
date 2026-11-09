@@ -14,6 +14,8 @@ playground's README states what it needs.
 ## Compatibility status
 
 [![PyMongo compatibility](/../compatibility-data/site/badges/pymongo.svg)](/../compatibility-data/site/README.md#pymongo)
+[![Node.js compatibility](/../compatibility-data/site/badges/nodejs.svg)](/../compatibility-data/site/README.md#nodejs)
+[![Mongoose compatibility](/../compatibility-data/site/badges/mongoose.svg)](/../compatibility-data/site/README.md#mongoose)
 
 [Run details and accessible results](/../compatibility-data/site/README.md)
 show tested versions, actual execution timestamps, and the latest attempt

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from compatibility import contracts
 from compatibility.contracts import (
     artifact_sha256,
     compatibility_state,
@@ -18,6 +19,7 @@ from compatibility.contracts import (
     validate_result,
     validate_schema,
 )
+from compatibility.results import validate_incoming_result
 
 pytestmark = pytest.mark.unit
 
@@ -187,6 +189,29 @@ def test_legacy_python_records_remain_unchanged_and_readable(record, registry):
     assert record == original
 
 
+@pytest.mark.parametrize("integration", ["nodejs", "mongoose"])
+def test_node_result_and_scoped_dependency_names_are_valid(record, registry, integration):
+    spec = registry["integrations"][integration]
+    record.update(
+        integration=integration, **{key: spec[key] for key in ("repository", "owner", "profile")}
+    )
+    record["expected_tests"] = list(spec["expected_tests"])
+    record["tests"] = [
+        {"id": name, "outcome": "passed", "message": ""} for name in spec["expected_tests"]
+    ]
+    record["upstream"].update(
+        version=spec["default_version"],
+        actual_version=spec["default_version"],
+        runtime={"name": "nodejs", "version": "24.0.0"},
+    )
+    record["upstream"]["dependencies"] = [
+        {"name": spec["package"], "version": spec["default_version"], "sha256": "b" * 64},
+        {"name": "@example/dependency", "version": "1.0.0", "sha256": "d" * 64},
+    ]
+    validate_result(record, spec)
+    assert compatibility_state(record) == "Working"
+
+
 @pytest.mark.parametrize("version", ["20.0.0", "3.12.0"])
 def test_node_result_requires_the_reviewed_runtime(record, version):
     record["upstream"]["runtime"] = {"name": "nodejs", "version": version}
@@ -212,6 +237,19 @@ def test_prepared_build_context_preserves_the_reviewed_suite(prepared_context, r
     assert suite_digest(integration, spec, prepared_context) == suite_digest(integration, spec)
 
 
+def test_historical_source_without_candidate_files_can_still_be_validated(
+    prepared_context, registry, selection, record, monkeypatch
+):
+    integration = selection["integration"]
+    spec = registry["integrations"][integration]
+    (prepared_context / "compatibility/schemas/npm-bundle.json").unlink()
+    record["suite_digest"] = suite_digest(integration, spec, prepared_context)
+    validate_incoming_result(record, registry, root=prepared_context)
+    monkeypatch.setattr(contracts, "ROOT", prepared_context)
+    with pytest.raises(FileNotFoundError):
+        suite_digest(integration, spec, prepared_context)
+
+
 @pytest.mark.parametrize(
     "filename",
     [
@@ -219,6 +257,7 @@ def test_prepared_build_context_preserves_the_reviewed_suite(prepared_context, r
         "compatibility/pyproject.toml",
         "compatibility/schemas/result.json",
         "compatibility/runner.py",
+        "compatibility/npm.py",
         "compatibility/integrations/pymongo/Dockerfile",
         "compatibility/integrations/pymongo/requirements.txt",
     ],

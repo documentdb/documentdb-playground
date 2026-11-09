@@ -8,13 +8,13 @@ on:
     paths:
       - "compatibility/**"
       - ".github/workflows/compatibility*"
-      - ".github/aw/actions-lock.json"
+      - ".github/ISSUE_TEMPLATE/compatibility-report.yml"
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
     paths:
       - "compatibility/**"
       - ".github/workflows/compatibility*"
-      - ".github/aw/actions-lock.json"
+      - ".github/ISSUE_TEMPLATE/compatibility-report.yml"
 
 concurrency:
   group: compatibility-infrastructure-${{ github.event.pull_request.number || github.ref }}
@@ -43,5 +43,15 @@ jobs:
           python -m mypy --config-file compatibility/pyproject.toml compatibility
       - name: Run compatibility unit tests
         run: python -m pytest -c compatibility/pyproject.toml compatibility/unit
+      - name: Check the trusted Git history publisher
+        run: shellcheck compatibility/persist.sh
       - name: Check the README dashboard publisher
         run: shellcheck compatibility/publish-readme.sh
+      - name: Check JavaScript reporting and dashboard freshness
+        run: |
+          image=$(sed -n 's/^FROM //p' compatibility/integrations/nodejs/Dockerfile)
+          docker run --rm --read-only --network none --user 1000:1000 \
+            --tmpfs /tmp:size=64m --cap-drop=ALL --security-opt=no-new-privileges \
+            --mount "type=bind,source=$PWD,target=/workspace,readonly" \
+            --workdir /workspace "$image" \
+            node --test compatibility/unit/test_freshness.cjs compatibility/unit/test_nodejs.cjs
